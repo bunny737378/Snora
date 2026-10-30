@@ -28,9 +28,6 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -43,7 +40,7 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Ensure Native Libraries
+      - name: Ensure NEWWFFMCREATEE Native Libraries
         run: |
           mkdir -p player/src/main/jniLibs/arm64-v8a player/src/main/jniLibs/armeabi-v7a
           if [ ! -f "player/src/main/jniLibs/arm64-v8a/libavcodec.so" ]; then
@@ -54,15 +51,9 @@ jobs:
             cp -v /tmp/ffmpeg_ci_unpacked/lib/arm64-v8a/*.so player/src/main/jniLibs/arm64-v8a/
             cp -v /tmp/ffmpeg_ci_unpacked/lib/armeabi-v7a/*.so player/src/main/jniLibs/armeabi-v7a/
           fi
-          if [ ! -f "player/src/main/jniLibs/arm64-v8a/libmpv.so" ]; then
-            echo "Downloading MPV core binaries..."
-            mkdir -p /tmp/mpv_ci
-            curl -L -s https://github.com/mpv-android/mpv-android/releases/download/2026-09-17/app-default-universal-release.apk -o /tmp/mpv_ci/mpv.apk
-            unzip -q /tmp/mpv_ci/mpv.apk -d /tmp/mpv_ci_unpacked
-            cp -v /tmp/mpv_ci_unpacked/lib/arm64-v8a/libmpv.so /tmp/mpv_ci_unpacked/lib/arm64-v8a/libplayer.so /tmp/mpv_ci_unpacked/lib/arm64-v8a/libc++_shared.so player/src/main/jniLibs/arm64-v8a/
-            cp -v /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libmpv.so /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libplayer.so /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libc++_shared.so player/src/main/jniLibs/armeabi-v7a/
-          fi
+          echo "Native libraries verified:"
           ls -lh player/src/main/jniLibs/arm64-v8a/
+          ls -lh player/src/main/jniLibs/armeabi-v7a/
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew
