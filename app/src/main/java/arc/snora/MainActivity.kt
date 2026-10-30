@@ -146,7 +146,8 @@ fun MainContent(
             )
             activeTitle = title
             setFullscreen(true)
-            player.playMedia(uriString, resumePosition)
+            val source = if (path.isNotBlank()) path else uriString
+            player.playMedia(source, resumePosition)
         }
     }
 

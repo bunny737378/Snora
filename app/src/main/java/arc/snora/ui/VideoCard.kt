@@ -51,8 +51,8 @@ fun VideoCard(
     val context = LocalContext.current
     var thumbnailBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
-    LaunchedEffect(video.uriString) {
-        thumbnailBitmap = ThumbnailLoader.loadThumbnail(context, video.uriString, video.id)
+    LaunchedEffect(video.uriString, video.path) {
+        thumbnailBitmap = ThumbnailLoader.loadThumbnail(context, video.uriString, video.id, video.path)
     }
 
     Row(

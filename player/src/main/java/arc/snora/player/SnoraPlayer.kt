@@ -29,6 +29,8 @@ class SnoraPlayer(private val context: Context) {
     private var currentSurface: Surface? = null
     private var progressJob: Job? = null
     private var currentPathOrUri: String = ""
+    private var activeStreamServer: FFmpegStreamServer? = null
+    private var isUsingFFmpegStream: Boolean = false
 
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
@@ -47,7 +49,7 @@ class SnoraPlayer(private val context: Context) {
                 val duration = mp.duration.toLong().coerceAtLeast(0L)
                 _playbackState.value = _playbackState.value.copy(
                     status = PlaybackStatus.PLAYING,
-                    durationMs = duration
+                    durationMs = if (duration > 0) duration else _playbackState.value.durationMs
                 )
                 refreshTracks()
                 videoRenderer.refreshVideoInfo()
@@ -58,17 +60,24 @@ class SnoraPlayer(private val context: Context) {
                 _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.ENDED)
             }
             setOnErrorListener { _, what, extra ->
-                _playbackState.value = _playbackState.value.copy(
-                    status = PlaybackStatus.ERROR,
-                    errorMessage = "Playback error: $what, extra: $extra"
-                )
-                true
+                if (!isUsingFFmpegStream) {
+                    switchToFFmpegPipeline(currentPathOrUri, _playbackState.value.positionMs)
+                    true
+                } else {
+                    _playbackState.value = _playbackState.value.copy(
+                        status = PlaybackStatus.ERROR,
+                        errorMessage = "Playback error: $what, extra: $extra"
+                    )
+                    true
+                }
             }
             setOnVideoSizeChangedListener { _, width, height ->
-                val current = _playbackState.value.videoInfo
-                _playbackState.value = _playbackState.value.copy(
-                    videoInfo = current.copy(width = width, height = height)
-                )
+                if (width > 0 && height > 0) {
+                    val current = _playbackState.value.videoInfo
+                    _playbackState.value = _playbackState.value.copy(
+                        videoInfo = current.copy(width = width, height = height)
+                    )
+                }
             }
         }
         currentSurface?.let { player.setSurface(it) }
@@ -102,6 +111,17 @@ class SnoraPlayer(private val context: Context) {
 
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
         currentPathOrUri = pathOrUri
+        isUsingFFmpegStream = false
+        stopStreamServer()
+
+        val isSwMode = _playbackState.value.hwDecMode == HwDecMode.SW
+        val isMatroska = pathOrUri.lowercase().contains(".mkv") || pathOrUri.lowercase().contains(".webm")
+
+        if (isSwMode || isMatroska) {
+            switchToFFmpegPipeline(pathOrUri, startPositionMs)
+            return
+        }
+
         val player = getOrCreateMediaPlayer()
         try {
             progressJob?.cancel()
@@ -116,38 +136,72 @@ class SnoraPlayer(private val context: Context) {
 
             _playbackState.value = _playbackState.value.copy(
                 status = PlaybackStatus.BUFFERING,
-                positionMs = startPositionMs
+                positionMs = startPositionMs,
+                videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "Hardware (MediaCodec)")
             )
 
             player.prepareAsync()
 
-            if (startPositionMs > 0L) {
-                player.setOnPreparedListener { mp ->
-                    val duration = mp.duration.toLong().coerceAtLeast(0L)
-                    _playbackState.value = _playbackState.value.copy(
-                        status = PlaybackStatus.PLAYING,
-                        durationMs = duration
-                    )
-                    refreshTracks()
-                    videoRenderer.refreshVideoInfo()
-                    mp.seekTo(startPositionMs.toInt())
-                    mp.start()
-                    startProgressTracker()
-                }
-            }
-
             playerScope.launch {
-                val probedTracks = FFmpegEngine.probeMedia(pathOrUri)
+                val probedTracks = FFmpegEngine.probeMedia(context, pathOrUri)
                 if (probedTracks.isNotEmpty()) {
                     _playbackState.value = _playbackState.value.copy(tracks = probedTracks)
                 }
             }
         } catch (t: Throwable) {
-            _playbackState.value = _playbackState.value.copy(
-                status = PlaybackStatus.ERROR,
-                errorMessage = t.localizedMessage ?: "Failed to open media"
-            )
+            switchToFFmpegPipeline(pathOrUri, startPositionMs)
         }
+    }
+
+    private fun switchToFFmpegPipeline(pathOrUri: String, startPositionMs: Long) {
+        isUsingFFmpegStream = true
+        val player = getOrCreateMediaPlayer()
+        playerScope.launch {
+            try {
+                progressJob?.cancel()
+                player.reset()
+                currentSurface?.let { player.setSurface(it) }
+
+                stopStreamServer()
+                val server = FFmpegEngine.createStreamServer(
+                    context = context,
+                    sourcePath = pathOrUri,
+                    startSec = startPositionMs / 1000L,
+                    forceTranscode = (_playbackState.value.hwDecMode == HwDecMode.SW)
+                )
+
+                if (server != null) {
+                    activeStreamServer = server
+                    val streamUrl = server.start()
+
+                    player.setDataSource(streamUrl)
+                    _playbackState.value = _playbackState.value.copy(
+                        status = PlaybackStatus.BUFFERING,
+                        positionMs = startPositionMs,
+                        videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "FFmpeg Custom SW (NEWWFFMCREATEE)")
+                    )
+                    player.prepareAsync()
+                } else {
+                    player.setDataSource(context, Uri.parse(pathOrUri))
+                    player.prepareAsync()
+                }
+
+                val probedTracks = FFmpegEngine.probeMedia(context, pathOrUri)
+                if (probedTracks.isNotEmpty()) {
+                    _playbackState.value = _playbackState.value.copy(tracks = probedTracks)
+                }
+            } catch (e: Exception) {
+                _playbackState.value = _playbackState.value.copy(
+                    status = PlaybackStatus.ERROR,
+                    errorMessage = e.localizedMessage ?: "Failed to play with FFmpeg engine"
+                )
+            }
+        }
+    }
+
+    private fun stopStreamServer() {
+        activeStreamServer?.stop()
+        activeStreamServer = null
     }
 
     fun pause() {
@@ -186,13 +240,18 @@ class SnoraPlayer(private val context: Context) {
     fun seekTo(positionMs: Long) {
         try {
             val player = mediaPlayer ?: return
-            val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                player.seekTo(clamped, MediaPlayer.SEEK_CLOSEST)
+            val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
+
+            if (isUsingFFmpegStream) {
+                switchToFFmpegPipeline(currentPathOrUri, clamped)
             } else {
-                player.seekTo(clamped.toInt())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    player.seekTo(clamped, MediaPlayer.SEEK_CLOSEST)
+                } else {
+                    player.seekTo(clamped.toInt())
+                }
+                _playbackState.value = _playbackState.value.copy(positionMs = clamped)
             }
-            _playbackState.value = _playbackState.value.copy(positionMs = clamped)
         } catch (e: Exception) {
         }
     }
@@ -323,6 +382,7 @@ class SnoraPlayer(private val context: Context) {
 
     fun destroy() {
         progressJob?.cancel()
+        stopStreamServer()
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()

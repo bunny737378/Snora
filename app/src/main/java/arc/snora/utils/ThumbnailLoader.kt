@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
+import arc.snora.player.FFmpegEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -20,32 +21,61 @@ object ThumbnailLoader {
         }
     }
 
-    suspend fun loadThumbnail(context: Context, uriString: String, videoId: Long): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun loadThumbnail(
+        context: Context,
+        uriString: String,
+        videoId: Long,
+        videoPath: String = ""
+    ): Bitmap? = withContext(Dispatchers.IO) {
         memoryCache.get(uriString)?.let { return@withContext it }
 
-        try {
-            val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                context.contentResolver.loadThumbnail(
-                    Uri.parse(uriString),
-                    Size(240, 160),
-                    null
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                MediaStore.Video.Thumbnails.getThumbnail(
-                    context.contentResolver,
-                    videoId,
-                    MediaStore.Video.Thumbnails.MINI_KIND,
-                    null
-                )
-            }
+        var bitmap: Bitmap? = null
 
-            bitmap?.let {
-                memoryCache.put(uriString, it)
+        val isMatroska = videoPath.lowercase().endsWith(".mkv") ||
+                videoPath.lowercase().endsWith(".webm") ||
+                uriString.lowercase().contains(".mkv") ||
+                uriString.lowercase().contains(".webm")
+
+        if (!isMatroska) {
+            try {
+                bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    context.contentResolver.loadThumbnail(
+                        Uri.parse(uriString),
+                        Size(240, 160),
+                        null
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    MediaStore.Video.Thumbnails.getThumbnail(
+                        context.contentResolver,
+                        videoId,
+                        MediaStore.Video.Thumbnails.MINI_KIND,
+                        null
+                    )
+                }
+            } catch (e: Exception) {
+                bitmap = null
             }
-            bitmap
-        } catch (e: Exception) {
-            null
         }
+
+        if (bitmap == null && videoPath.isNotBlank()) {
+            bitmap = FFmpegEngine.extractThumbnail(context, videoPath)
+        }
+
+        if (bitmap == null && isMatroska && uriString.isNotBlank()) {
+            val resolvedPath = if (uriString.startsWith("file://")) {
+                Uri.parse(uriString).path ?: ""
+            } else {
+                videoPath
+            }
+            if (resolvedPath.isNotBlank()) {
+                bitmap = FFmpegEngine.extractThumbnail(context, resolvedPath)
+            }
+        }
+
+        bitmap?.let {
+            memoryCache.put(uriString, it)
+        }
+        bitmap
     }
 }
