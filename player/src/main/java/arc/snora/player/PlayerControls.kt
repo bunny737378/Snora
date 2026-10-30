@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -66,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -99,6 +101,24 @@ fun PlayerControls(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     Box(modifier = modifier.fillMaxSize()) {
+        if (state.currentSubtitleText.isNotBlank()) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = if (isHudVisible) 110.dp else 40.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = state.currentSubtitleText,
+                    color = Color.Yellow,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+
         AnimatedVisibility(
             visible = gestureState.isVisible && gestureState.iconType == GestureIconType.BRIGHTNESS,
             enter = fadeIn(),
@@ -217,6 +237,19 @@ fun PlayerControls(
                             .padding(horizontal = 8.dp)
                     )
 
+                    if (state.chapters.isNotEmpty()) {
+                        IconButton(
+                            onClick = { activeMenu = "chapters" },
+                            modifier = Modifier.testTag("chapters_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bookmark,
+                                contentDescription = "Chapters",
+                                tint = Color.White
+                            )
+                        }
+                    }
+
                     IconButton(
                         onClick = { activeMenu = "tracks" },
                         modifier = Modifier.testTag("tracks_button")
@@ -307,24 +340,44 @@ fun PlayerControls(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = formatTimestamp(effectivePosition),
+                            text = "${formatTimestamp(effectivePosition)} / ${formatTimestamp(state.durationMs)}",
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
 
-                        Text(
-                            text = formatTimestamp(state.durationMs),
-                            color = Color.LightGray,
-                            fontSize = 12.sp
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = { activeMenu = "speed" },
+                                modifier = Modifier.testTag("speed_button")
+                            ) {
+                                Text(
+                                    text = "${state.speed}x",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            IconButton(
+                                onClick = onToggleOrientation,
+                                modifier = Modifier.testTag("orientation_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ScreenRotation,
+                                    contentDescription = "Rotate Screen",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
 
                     Slider(
                         value = effectivePosition.toFloat().coerceIn(0f, state.durationMs.toFloat().coerceAtLeast(1f)),
-                        onValueChange = {
+                        onValueChange = { pos ->
                             isScrubbingLocal = true
-                            scrubPosition = it
+                            scrubPosition = pos
                             onScrubbingChange(true)
                         },
                         onValueChangeFinished = {
@@ -336,119 +389,43 @@ fun PlayerControls(
                         colors = SliderDefaults.colors(
                             thumbColor = MaterialTheme.colorScheme.primary,
                             activeTrackColor = MaterialTheme.colorScheme.primary,
-                            inactiveTrackColor = Color(0x66FFFFFF)
+                            inactiveTrackColor = Color.Gray
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(28.dp)
-                            .testTag("player_seekbar")
+                            .testTag("player_timeline_slider")
                     )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TextButton(
-                            onClick = { activeMenu = "speed" },
-                            modifier = Modifier.testTag("speed_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Speed,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "${state.speed}x",
-                                color = Color.White,
-                                fontSize = 12.sp
-                            )
-                        }
-
-                        Text(
-                            text = state.aspectRatioMode.label,
-                            color = Color.LightGray,
-                            fontSize = 12.sp,
-                            modifier = Modifier.clickable { onCycleAspectRatio() }
-                        )
-
-                        IconButton(
-                            onClick = onToggleOrientation,
-                            modifier = Modifier.testTag("orientation_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ScreenRotation,
-                                contentDescription = "Rotate Screen",
-                                tint = Color.White
-                            )
-                        }
-                    }
                 }
             }
         }
 
-        if (activeMenu != null) {
-            Box(
+        AnimatedVisibility(
+            visible = activeMenu != null,
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                color = Color(0xEE1A1C22),
+                contentColor = Color.White,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0x66000000))
-                    .clickable { activeMenu = null }
+                    .fillMaxWidth()
+                    .testTag("player_menu_surface")
             ) {
-                if (isLandscape) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .width(340.dp)
-                            .align(Alignment.CenterEnd)
-                            .clickable(enabled = false) {}
-                    ) {
-                        Surface(
-                            modifier = Modifier.fillMaxSize(),
-                            shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp),
-                            color = Color(0xF0181A20),
-                            contentColor = Color.White
-                        ) {
-                            MenuContent(
-                                menuType = activeMenu!!,
-                                state = state,
-                                onClose = { activeMenu = null },
-                                onSetSpeed = onSetSpeed,
-                                onSelectSubtitle = onSelectSubtitle,
-                                onSelectAudio = onSelectAudio,
-                                onSubDelayAdjust = onSubDelayAdjust,
-                                onAudioDelayAdjust = onAudioDelayAdjust,
-                                onHwDecChange = onHwDecChange
-                            )
-                        }
-                    }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.BottomCenter)
-                            .clickable(enabled = false) {}
-                    ) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                            color = Color(0xF0181A20),
-                            contentColor = Color.White
-                        ) {
-                            MenuContent(
-                                menuType = activeMenu!!,
-                                state = state,
-                                onClose = { activeMenu = null },
-                                onSetSpeed = onSetSpeed,
-                                onSelectSubtitle = onSelectSubtitle,
-                                onSelectAudio = onSelectAudio,
-                                onSubDelayAdjust = onSubDelayAdjust,
-                                onAudioDelayAdjust = onAudioDelayAdjust,
-                                onHwDecChange = onHwDecChange
-                            )
-                        }
-                    }
+                activeMenu?.let { menu ->
+                    MenuContent(
+                        menuType = menu,
+                        state = state,
+                        onClose = { activeMenu = null },
+                        onSetSpeed = onSetSpeed,
+                        onSelectSubtitle = onSelectSubtitle,
+                        onSelectAudio = onSelectAudio,
+                        onSubDelayAdjust = onSubDelayAdjust,
+                        onAudioDelayAdjust = onAudioDelayAdjust,
+                        onHwDecChange = onHwDecChange,
+                        onSeek = onSeek
+                    )
                 }
             }
         }
@@ -459,46 +436,43 @@ fun PlayerControls(
 fun VerticalGesturePill(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     text: String,
-    progress: Float,
-    modifier: Modifier = Modifier
+    progress: Float
 ) {
     Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(20.dp),
         color = Color(0xCC111318),
-        contentColor = Color.White,
-        modifier = modifier
-            .width(44.dp)
-            .height(180.dp)
+        contentColor = Color.White
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(vertical = 12.dp, horizontal = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            modifier = Modifier.padding(vertical = 16.dp, horizontal = 12.dp)
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                modifier = Modifier.size(22.dp),
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
             )
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             Box(
                 modifier = Modifier
-                    .width(4.dp)
-                    .height(90.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0x44FFFFFF)),
-                contentAlignment = Alignment.BottomCenter
+                    .width(6.dp)
+                    .height(100.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.Gray.copy(alpha = 0.4f))
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .fillMaxHeight(progress.coerceIn(0f, 1f))
-                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp))
+                        .align(Alignment.BottomCenter)
+                        .background(MaterialTheme.colorScheme.primary)
                 )
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = text,
@@ -520,7 +494,8 @@ fun MenuContent(
     onSelectAudio: (Int) -> Unit,
     onSubDelayAdjust: (Double) -> Unit,
     onAudioDelayAdjust: (Double) -> Unit,
-    onHwDecChange: (HwDecMode) -> Unit
+    onHwDecChange: (HwDecMode) -> Unit,
+    onSeek: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -535,6 +510,7 @@ fun MenuContent(
             val title = when (menuType) {
                 "speed" -> "Playback Speed"
                 "tracks" -> "Audio & Subtitles"
+                "chapters" -> "Chapters"
                 "info" -> "Decoder & Info"
                 else -> ""
             }
@@ -583,6 +559,37 @@ fun MenuContent(
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(20.dp)
                             )
+                        }
+                    }
+                }
+            }
+            "chapters" -> {
+                LazyColumn(modifier = Modifier.height(240.dp)) {
+                    items(state.chapters) { chapter ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onSeek(chapter.startMs)
+                                    onClose()
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = chapter.title,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "${formatTimestamp(chapter.startMs)} - ${formatTimestamp(chapter.endMs)}",
+                                    fontSize = 12.sp,
+                                    color = Color.LightGray
+                                )
+                            }
                         }
                     }
                 }

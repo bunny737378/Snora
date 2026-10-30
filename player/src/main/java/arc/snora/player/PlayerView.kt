@@ -11,7 +11,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -23,7 +22,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlin.math.abs
 
@@ -72,7 +70,7 @@ fun PlayerView(
                             if (abs(dragAmount.y) > abs(dragAmount.x) * 1.3f) {
                                 change.consume()
                                 val isLeftHalf = change.position.x < size.width / 2
-                                val deltaPercent = -dragAmount.y / (size.height * 0.7f)
+                                val deltaPercent = -dragAmount.y / (size.height * 0.8f)
 
                                 if (isLeftHalf) {
                                     controller.adjustBrightnessGesture(activity, deltaPercent)
@@ -85,61 +83,6 @@ fun PlayerView(
                 }
             }
     ) {
-        val containerWidth = maxWidth
-        val containerHeight = maxHeight
-
-        val videoW = if (playbackState.videoInfo.width > 0) playbackState.videoInfo.width.toFloat() else 16f
-        val videoH = if (playbackState.videoInfo.height > 0) playbackState.videoInfo.height.toFloat() else 9f
-        val videoAspect = videoW / videoH
-
-        val surfaceModifier = when (playbackState.aspectRatioMode) {
-            AspectRatioMode.FIT -> {
-                val containerAspect = containerWidth.value / containerHeight.value.coerceAtLeast(1f)
-                if (videoAspect > containerAspect) {
-                    val h = containerWidth.value / videoAspect
-                    Modifier.size(containerWidth, h.dp)
-                } else {
-                    val w = containerHeight.value * videoAspect
-                    Modifier.size(w.dp, containerHeight)
-                }
-            }
-            AspectRatioMode.CROP -> {
-                val containerAspect = containerWidth.value / containerHeight.value.coerceAtLeast(1f)
-                if (videoAspect > containerAspect) {
-                    val w = containerHeight.value * videoAspect
-                    Modifier.size(w.dp, containerHeight)
-                } else {
-                    val h = containerWidth.value / videoAspect
-                    Modifier.size(containerWidth, h.dp)
-                }
-            }
-            AspectRatioMode.STRETCH -> {
-                Modifier.fillMaxSize()
-            }
-            AspectRatioMode.RATIO_16_9 -> {
-                val targetAspect = 16f / 9f
-                val containerAspect = containerWidth.value / containerHeight.value.coerceAtLeast(1f)
-                if (targetAspect > containerAspect) {
-                    val h = containerWidth.value / targetAspect
-                    Modifier.size(containerWidth, h.dp)
-                } else {
-                    val w = containerHeight.value * targetAspect
-                    Modifier.size(w.dp, containerHeight)
-                }
-            }
-            AspectRatioMode.RATIO_4_3 -> {
-                val targetAspect = 4f / 3f
-                val containerAspect = containerWidth.value / containerHeight.value.coerceAtLeast(1f)
-                if (targetAspect > containerAspect) {
-                    val h = containerWidth.value / targetAspect
-                    Modifier.size(containerWidth, h.dp)
-                } else {
-                    val w = containerHeight.value * targetAspect
-                    Modifier.size(w.dp, containerHeight)
-                }
-            }
-        }
-
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
@@ -167,7 +110,7 @@ fun PlayerView(
                         })
                     }
                 },
-                modifier = surfaceModifier
+                modifier = Modifier.fillMaxSize()
             )
         }
 

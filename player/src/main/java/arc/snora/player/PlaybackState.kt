@@ -62,6 +62,8 @@ data class PlaybackState(
     val aspectRatioMode: AspectRatioMode = AspectRatioMode.FIT,
     val hwDecMode: HwDecMode = HwDecMode.AUTO,
     val tracks: List<TrackItem> = emptyList(),
+    val chapters: List<ChapterItem> = emptyList(),
+    val currentSubtitleText: String = "",
     val selectedAudioTrackId: Int = -1,
     val selectedSubtitleTrackId: Int = -1,
     val videoInfo: VideoInfo = VideoInfo(),

@@ -44,6 +44,8 @@ class PlayerController(
     private var gestureHideJob: Job? = null
     private var isScrubbing: Boolean = false
 
+    private var accumulatedVolumeDelta: Float = 0f
+
     private val systemAudioManager =
         context.getSystemService(Context.AUDIO_SERVICE) as? AndroidAudioManager
 
@@ -114,15 +116,19 @@ class PlayerController(
         systemAudioManager?.let { am ->
             val max = am.getStreamMaxVolume(AndroidAudioManager.STREAM_MUSIC)
             val current = am.getStreamVolume(AndroidAudioManager.STREAM_MUSIC)
-            val deltaSteps = (deltaPercent * max * 1.5f).toInt()
-            val target = (current + (if (deltaSteps == 0) (if (deltaPercent > 0) 1 else -1) else deltaSteps)).coerceIn(0, max)
-            am.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, target, 0)
-            val pct = target.toFloat() / max.toFloat().coerceAtLeast(1f)
-            showGestureOverlay(
-                GestureIconType.VOLUME,
-                "${(pct * 100).toInt()}%",
-                pct
-            )
+            accumulatedVolumeDelta += deltaPercent * max * 0.8f
+            val steps = accumulatedVolumeDelta.toInt()
+            if (steps != 0) {
+                val target = (current + steps).coerceIn(0, max)
+                am.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, target, 0)
+                accumulatedVolumeDelta -= steps
+                val pct = target.toFloat() / max.toFloat().coerceAtLeast(1f)
+                showGestureOverlay(
+                    GestureIconType.VOLUME,
+                    "${(pct * 100).toInt()}%",
+                    pct
+                )
+            }
         }
     }
 

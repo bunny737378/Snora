@@ -74,6 +74,18 @@ struct NativeTrackInfo {
 static std::vector<NativeTrackInfo> g_tracks;
 static pthread_mutex_t g_tracksMutex = PTHREAD_MUTEX_INITIALIZER;
 
+struct NativeChapterInfo {
+    int id;
+    std::string title;
+    int64_t startMs;
+    int64_t endMs;
+};
+static std::vector<NativeChapterInfo> g_chapters;
+static pthread_mutex_t g_chaptersMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static std::string g_currentSubText = "";
+static std::mutex g_subTextMutex;
+
 struct MyPacket {
     AVPacket* pkt;
     bool is_flush;
@@ -533,15 +545,19 @@ static void subtitleDecoderThread(AVCodecContext* codecCtx, int streamIdx) {
         if (mp.is_flush) {
             std::lock_guard<std::mutex> lock(g_subOverlayMutex);
             g_subOverlay.active = false;
+            {
+                std::lock_guard<std::mutex> tLock(g_subTextMutex);
+                g_currentSubText = "";
+            }
             continue;
         }
 
         int gotSub = 0;
         if (avcodec_decode_subtitle2(codecCtx, &subtitle, &gotSub, mp.pkt) >= 0 && gotSub) {
             if (subtitle.num_rects > 0) {
-                std::lock_guard<std::mutex> lock(g_subOverlayMutex);
                 AVSubtitleRect* rect = subtitle.rects[0];
                 if (rect->type == SUBTITLE_BITMAP && rect->w > 0 && rect->h > 0) {
+                    std::lock_guard<std::mutex> lock(g_subOverlayMutex);
                     g_subOverlay.width = rect->w;
                     g_subOverlay.height = rect->h;
                     g_subOverlay.rgbaData.resize(rect->w * rect->h);
@@ -555,8 +571,18 @@ static void subtitleDecoderThread(AVCodecContext* codecCtx, int streamIdx) {
                     }
                     g_subOverlay.active = true;
                 } else if (rect->text || rect->ass) {
-                    g_subOverlay.active = false;
+                    std::lock_guard<std::mutex> tLock(g_subTextMutex);
+                    if (rect->text) g_currentSubText = rect->text;
+                    else if (rect->ass) {
+                        std::string assStr = rect->ass;
+                        size_t pos = assStr.rfind(",");
+                        if (pos != std::string::npos) g_currentSubText = assStr.substr(pos + 1);
+                        else g_currentSubText = assStr;
+                    }
                 }
+            } else {
+                std::lock_guard<std::mutex> tLock(g_subTextMutex);
+                g_currentSubText = "";
             }
             avsubtitle_free(&subtitle);
         }
@@ -726,6 +752,20 @@ static void demuxPlaybackWorker(std::string videoUrl) {
     }
     pthread_mutex_unlock(&g_tracksMutex);
 
+    pthread_mutex_lock(&g_chaptersMutex);
+    g_chapters.clear();
+    for (unsigned int i = 0; i < formatCtx->nb_chapters; ++i) {
+        AVChapter* ch = formatCtx->chapters[i];
+        std::string title = "Chapter " + std::to_string(i + 1);
+        AVDictionaryEntry* tEntry = av_dict_get(ch->metadata, "title", nullptr, 0);
+        if (tEntry && tEntry->value) title = tEntry->value;
+
+        int64_t startMs = static_cast<int64_t>(ch->start * av_q2d(ch->time_base) * 1000);
+        int64_t endMs = static_cast<int64_t>(ch->end * av_q2d(ch->time_base) * 1000);
+        g_chapters.push_back({(int)i, title, startMs, endMs});
+    }
+    pthread_mutex_unlock(&g_chaptersMutex);
+
     g_selectedAudioStreamIndex.store(aIdx);
     g_selectedSubtitleStreamIndex.store(subIdx);
 
@@ -762,26 +802,58 @@ static void demuxPlaybackWorker(std::string videoUrl) {
 
     AVCodecContext* aCtx = nullptr;
     std::thread aThread;
-    if (aIdx >= 0) {
-        const AVCodec* aCodec = avcodec_find_decoder(formatCtx->streams[aIdx]->codecpar->codec_id);
-        if (aCodec) {
-            aCtx = avcodec_alloc_context3(aCodec);
-            avcodec_parameters_to_context(aCtx, formatCtx->streams[aIdx]->codecpar);
-            avcodec_open2(aCtx, aCodec, nullptr);
-            aThread = std::thread(audioDecoderThread, aCtx, aIdx, av_q2d(formatCtx->streams[aIdx]->time_base));
+    auto initAudioDecoder = [&](int streamIndex) {
+        if (aThread.joinable()) {
+            g_audioQueue.abort();
+            aThread.join();
+            g_audioQueue.start();
         }
+        if (aCtx) {
+            avcodec_free_context(&aCtx);
+            aCtx = nullptr;
+        }
+        if (streamIndex >= 0 && streamIndex < (int)formatCtx->nb_streams) {
+            const AVCodec* aCodec = avcodec_find_decoder(formatCtx->streams[streamIndex]->codecpar->codec_id);
+            if (aCodec) {
+                aCtx = avcodec_alloc_context3(aCodec);
+                avcodec_parameters_to_context(aCtx, formatCtx->streams[streamIndex]->codecpar);
+                if (avcodec_open2(aCtx, aCodec, nullptr) >= 0) {
+                    aThread = std::thread(audioDecoderThread, aCtx, streamIndex, av_q2d(formatCtx->streams[streamIndex]->time_base));
+                }
+            }
+        }
+    };
+
+    if (aIdx >= 0) {
+        initAudioDecoder(aIdx);
     }
 
     AVCodecContext* subCtx = nullptr;
     std::thread subThread;
-    if (subIdx >= 0) {
-        const AVCodec* subCodec = avcodec_find_decoder(formatCtx->streams[subIdx]->codecpar->codec_id);
-        if (subCodec) {
-            subCtx = avcodec_alloc_context3(subCodec);
-            avcodec_parameters_to_context(subCtx, formatCtx->streams[subIdx]->codecpar);
-            avcodec_open2(subCtx, subCodec, nullptr);
-            subThread = std::thread(subtitleDecoderThread, subCtx, subIdx);
+    auto initSubtitleDecoder = [&](int streamIndex) {
+        if (subThread.joinable()) {
+            g_subtitleQueue.abort();
+            subThread.join();
+            g_subtitleQueue.start();
         }
+        if (subCtx) {
+            avcodec_free_context(&subCtx);
+            subCtx = nullptr;
+        }
+        if (streamIndex >= 0 && streamIndex < (int)formatCtx->nb_streams) {
+            const AVCodec* subCodec = avcodec_find_decoder(formatCtx->streams[streamIndex]->codecpar->codec_id);
+            if (subCodec) {
+                subCtx = avcodec_alloc_context3(subCodec);
+                avcodec_parameters_to_context(subCtx, formatCtx->streams[streamIndex]->codecpar);
+                if (avcodec_open2(subCtx, subCodec, nullptr) >= 0) {
+                    subThread = std::thread(subtitleDecoderThread, subCtx, streamIndex);
+                }
+            }
+        }
+    };
+
+    if (subIdx >= 0) {
+        initSubtitleDecoder(subIdx);
     }
 
     AVPacket* pkt = av_packet_alloc();
@@ -791,7 +863,7 @@ static void demuxPlaybackWorker(std::string videoUrl) {
             aIdx = reqAudio;
             g_selectedAudioStreamIndex.store(aIdx);
             g_audioQueue.flush();
-            g_audioQueue.put_flush();
+            initAudioDecoder(aIdx);
         }
 
         int reqSub = g_requestedSubtitleStreamIndex.exchange(-2);
@@ -799,7 +871,7 @@ static void demuxPlaybackWorker(std::string videoUrl) {
             subIdx = reqSub;
             g_selectedSubtitleStreamIndex.store(subIdx);
             g_subtitleQueue.flush();
-            g_subtitleQueue.put_flush();
+            initSubtitleDecoder(subIdx);
         }
 
         int64_t targetSeek = g_seekTargetMs.exchange(-1);
@@ -930,6 +1002,29 @@ JNIEXPORT jstring JNICALL Java_arc_snora_player_SnoraNativeEngine_getTracksJson(
     json << "]";
     pthread_mutex_unlock(&g_tracksMutex);
     return env->NewStringUTF(json.str().c_str());
+}
+
+JNIEXPORT jstring JNICALL Java_arc_snora_player_SnoraNativeEngine_getChaptersJson(JNIEnv* env, jobject thiz) {
+    pthread_mutex_lock(&g_chaptersMutex);
+    std::ostringstream json;
+    json << "[";
+    for (size_t i = 0; i < g_chapters.size(); ++i) {
+        const auto& c = g_chapters[i];
+        if (i > 0) json << ",";
+        json << "{\"id\":" << c.id
+             << ",\"title\":\"" << escapeJson(c.title) << "\""
+             << ",\"startMs\":" << c.startMs
+             << ",\"endMs\":" << c.endMs
+             << "}";
+    }
+    json << "]";
+    pthread_mutex_unlock(&g_chaptersMutex);
+    return env->NewStringUTF(json.str().c_str());
+}
+
+JNIEXPORT jstring JNICALL Java_arc_snora_player_SnoraNativeEngine_getCurrentSubtitleText(JNIEnv* env, jobject thiz) {
+    std::lock_guard<std::mutex> lock(g_subTextMutex);
+    return env->NewStringUTF(g_currentSubText.c_str());
 }
 
 JNIEXPORT void JNICALL Java_arc_snora_player_SnoraNativeEngine_setAudioTrack(JNIEnv* env, jobject thiz, jint streamIndex) {

@@ -174,9 +174,11 @@ class SnoraPlayer(private val context: Context) {
         playerScope.launch {
             delay(500)
             val nativeTracks = SnoraNativeEngine.getAvailableTracks()
-            if (nativeTracks.isNotEmpty()) {
-                _playbackState.value = _playbackState.value.copy(tracks = nativeTracks)
-            }
+            val nativeChapters = SnoraNativeEngine.getAvailableChapters()
+            _playbackState.value = _playbackState.value.copy(
+                tracks = nativeTracks,
+                chapters = nativeChapters
+            )
         }
     }
 
@@ -187,6 +189,7 @@ class SnoraPlayer(private val context: Context) {
                 val dur = SnoraNativeEngine.getDurationMs()
                 val pos = SnoraNativeEngine.getCurrentPositionMs()
                 val isPlaying = SnoraNativeEngine.isPlaying()
+                val subText = SnoraNativeEngine.getCurrentSubtitleText()
 
                 val w = SnoraNativeEngine.getVideoWidth()
                 val h = SnoraNativeEngine.getVideoHeight()
@@ -200,6 +203,7 @@ class SnoraPlayer(private val context: Context) {
                 _playbackState.value = _playbackState.value.copy(
                     durationMs = if (dur > 0) dur else _playbackState.value.durationMs,
                     positionMs = pos,
+                    currentSubtitleText = subText,
                     videoInfo = newInfo,
                     status = if (isPlaying) PlaybackStatus.PLAYING else PlaybackStatus.PAUSED
                 )

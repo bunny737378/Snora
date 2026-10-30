@@ -3,6 +3,13 @@ package arc.snora.player
 import android.view.Surface
 import org.json.JSONArray
 
+data class ChapterItem(
+    val id: Int,
+    val title: String,
+    val startMs: Long,
+    val endMs: Long
+)
+
 object SnoraNativeEngine {
 
     var isLoaded: Boolean = false
@@ -62,6 +69,10 @@ object SnoraNativeEngine {
 
     external fun getTracksJson(): String
 
+    external fun getChaptersJson(): String
+
+    external fun getCurrentSubtitleText(): String
+
     external fun setAudioTrack(streamIndex: Int)
 
     external fun getVideoWidth(): Int
@@ -106,6 +117,39 @@ object SnoraNativeEngine {
                         lang = lang,
                         codec = codec,
                         isSelected = isSelected
+                    )
+                )
+            }
+        } catch (e: Exception) {
+        }
+        return list
+    }
+
+    fun getAvailableChapters(): List<ChapterItem> {
+        if (!isLoaded) return emptyList()
+        val jsonStr = try {
+            getChaptersJson()
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        if (jsonStr.isBlank() || jsonStr == "[]") return emptyList()
+
+        val list = mutableListOf<ChapterItem>()
+        try {
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val id = obj.optInt("id", i)
+                val title = obj.optString("title", "Chapter ${i + 1}")
+                val startMs = obj.optLong("startMs", 0L)
+                val endMs = obj.optLong("endMs", 0L)
+
+                list.add(
+                    ChapterItem(
+                        id = id,
+                        title = title,
+                        startMs = startMs,
+                        endMs = endMs
                     )
                 )
             }
