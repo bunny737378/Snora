@@ -1,145 +1,105 @@
-# SNORA — Android Video Player Application
+# SNORA Media Player: Native C++ GPU Renderer & Advanced Engine Upgrade
 
-SNORA is a high-performance, modern Android video player built on the MPV playback core, packaged with custom precompiled FFmpeg modular libraries from `NEWWFFMCREATEE`, and designed with an independent modular architecture and dynamic Material 3 interface.
+Upgrading the SNORA Android media player JNI engine to a high-performance, GPU-accelerated pipeline powered by OpenGL ES 2.0/3.0, EGL, MediaCodec hardware decoding, pitch-preserving audio speed filters, native subtitle overlay, and exact aspect ratio transformation matrices while preserving our 3-thread demuxing/decoding architecture and Jetpack Compose UI.
 
-### User Review & Critical Decisions
+---
+
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural decisions reflect user feedback from Phase 1 and established requirements:
+> The following architectural directives were explicitly confirmed by the user:
 
-- **Confirmed Decision 1 (Theming & Styling)**: Material You dynamic theming (`dynamicLightColorScheme` / `dynamicDarkColorScheme`) based on system wallpaper, complemented with deep surface styling for video rendering and player controls.
-- **Confirmed Decision 2 (Target Architectures)**: `arm64-v8a` (primary 64-bit modern devices) and `armeabi-v7a` (32-bit legacy devices) packaged into the final APK.
-- **Confirmed Decision 3 (Default Screen)**: Videos screen serving as the default start destination, offering immediate access to device media, video thumbnails, durations, and quick resume badges.
-- **Code Cleanliness Requirement**: Strict compliance with the zero-comment requirement across all Kotlin and Java application source code (no inline, block, or TODO comments).
-
----
-
-### 1. Overview & Core Concept
-
-- **What It Does**: SNORA is a standalone video player for Android capable of playing virtually any video or audio format (MKV, MP4, AVI, MOV, WebM, FLV, TS, MP3, FLAC, Opus, AAC) with hardware-accelerated decoding (MediaCodec via FFmpeg), rich subtitle rendering (SSA/ASS, SRT, PGS, VobSub), multi-audio stream switching, and modern gesture-driven playback controls.
-- **Target Audience / Persona**: Users who demand high-fidelity playback of local and network media files with complex codecs (10-bit HDR HEVC, AV1, DTS-HD, TrueHD, EAC3/Atmos) and styled anime/movie subtitles that standard system players cannot handle.
-- **Key Value**: Delivers the playback power of MPV and custom FFmpeg builds without requiring native compilation during Gradle builds, wrapped in a clean, modern, modular Android application.
+- **Core Engine Architecture**: Retain custom JNI `snora-player.cpp` and 3-thread model (Demuxer, Audio Master Clock, Video Decoder). Do **NOT** use `libmpv` wrapper binaries.
+- **Rendering Pipeline**: Replace CPU `sws_scale` and `ANativeWindow_lock` with EGL + OpenGL ES 2.0/3.0 YUV-to-RGB fragment shaders rendering directly onto `ANativeWindow` / `SurfaceView`.
+- **Hardware Acceleration**: Integrate FFmpeg `hwcontext_mediacodec` (`AV_HWDEVICE_TYPE_MEDIACODEC`) with automatic fallback to software decoding on codec error.
+- **Aspect Ratio & Zooming**: Implement vertex matrix transformations in GLES shaders supporting Fit, Crop, Stretch, and custom Zoom levels.
+- **Audio Pitch-Preserving Speed**: Utilize FFmpeg `atempo` audio filter graph (`libavfilter`) to preserve pitch when changing speed (0.25x – 4.0x) paired with master audio clock adjustment.
+- **Subtitle Rendering**: Decode native ASS/SRT tracks using `avcodec_decode_subtitle2` and render bitmap/text overlays as alpha-blended GLES textures on top of the video frame.
 
 ---
 
-### 2. User Experience & Visual Design
+## 1. Overview & Core Concept
 
-- **Key User Flows**:
-  1. *Browse & Select*: User launches SNORA directly into the **Videos** library tab with instant thumbnails, durations, file resolutions, and progress bars.
-  2. *Folder Navigation*: User switches to the **Folders** tab to navigate specific internal storage directories or external SD/USB storage paths.
-  3. *Playback & Gestures*: Tapping any video launches the fullscreen immersive **PlayerView**:
-     - Swipe vertically on the left side to adjust brightness.
-     - Swipe vertically on the right side to adjust volume.
-     - Swipe horizontally or double-tap left/right to seek (10s increments).
-     - Tap anywhere to toggle on-screen HUD (play/pause, seekbar, track selector, aspect ratio, speed, lock).
-  4. *Audio & Subtitle Track Control*: Fast bottom sheet to switch between multiple embedded or external subtitle tracks and audio streams with synchronization offset adjustments (-5.0s to +5.0s).
-  5. *History & Favorites*: Quick resume from the **History** tab or bookmarking favorite videos in the **Favorites** tab.
-
-- **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Refined Material Design 3 (M3) with fluid edge-to-edge layout, rounded container corners (16dp-24dp), and high-contrast video playback overlays.
-  - *Color Palette & Mood*: Dynamic Material You color scheme pulling tonal palettes from user wallpaper, with black/translucent overlay surfaces (`Color(0xCC0A0A0E)`) during media playback for optimal visual focus.
-  - *Typography & Hierarchy*: Bold M3 Headline/Title typography with clear tabular figures for video timestamps (`01:23:45 / 02:10:00`) and metadata chips.
-  - *Component Styling & Layout*: Clean bottom navigation bar (`NavigationBar`), card-based media items with thumbnail placeholders, duration badges, and smooth spring-animated player controls.
-
-- **Interactive Feedback & Motion**:
-  - Controls auto-fade after 3.5 seconds of inactivity.
-  - Haptic feedback on gesture seek boundaries, lock toggle, and track selection.
-  - Smooth animated visibility transitions for volume and brightness HUD indicators.
+- **Goal**: Deliver a desktop-grade, zero-stutter Android media player capable of smoothly playing high-bitrate 4K, 10bit HDR, MKV, MP4, and web streams without memory alignment crashes or CPU bottlenecking.
+- **Target Experience**: Seamless playback control with instant seek response, hardware acceleration status indicators, pitch-corrected playback speed adjustments, and accurate subtitle display.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
+## 2. User Experience & Visual Design
 
-- **Decision 1: Modular Multi-Project Architecture (`:app` and `:player`)**
-  - *Chosen Approach*: Decouple into a `:player` Android library module (`arc.snora.player`) containing the MPV/FFmpeg engine, JNI bridge, and player controllers, and an `:app` module (`arc.snora`) containing navigation, media indexing, and UI screens.
-  - *Why*: Ensures strict separation of concerns, high reusability of the playback engine, and clean dependency boundaries.
-  - *Alternatives Considered*: Single monolithic module (rejected due to user requirement for an independent, reusable player library).
-
-- **Decision 2: Direct Precompiled FFmpeg & MPV Native Integration**
-  - *Chosen Approach*: Integrate precompiled shared libraries (`.so`) directly into `native-libs/` / `jniLibs` (`arm64-v8a` and `armeabi-v7a`) downloaded from the latest `NEWWFFMCREATEE` release (`ffmpeg.zip`) and upstream MPV binaries, eliminating any source-level native compilation during standard Gradle builds.
-  - *Why*: Eliminates brittle NDK build script dependencies, cuts build time from 40+ minutes to seconds, and guarantees validated codec support (HEVC 10-bit, AV1, DTS, TrueHD, AC3, MediaCodec).
-  - *Alternatives Considered*: Running NDK CMake/ndk-build during every build (rejected per explicit prompt instructions).
-
-- **Decision 3: JNI & Package Namespace Compatibility Bridge**
-  - *Chosen Approach*: Provide complete rebranding under package `arc.snora` for the application, while structuring the low-level JNI interface in `:player` to seamlessly bridge native JNI symbols to `arc.snora.player.SnoraPlayer` and `PlayerController`.
-  - *Why*: Prevents `UnsatisfiedLinkError` when linking against precompiled C/C++ libraries while exposing a 100% clean, rebranded Kotlin API (`arc.snora.player.*`).
-  - *Alternatives Considered*: Hardcoded namespace renaming without binary symbol validation (risks fatal runtime linker crashes).
-
-- **Decision 4: Modern Jetpack Compose UI with MediaStore Indexer**
-  - *Chosen Approach*: Implement modern Jetpack Compose for the entire application interface, replacing legacy XML fragments while preserving the simple, intuitive layout hierarchy of the original app.
-  - *Why*: First-class support for Material You dynamic theming, declarative state management, edge-to-edge support, and seamless lifecycle handling.
+- **Player Interface**: Material Design 3 Jetpack Compose controls overlaid on `SurfaceView`.
+- **Visual Controls**:
+  - Aspect ratio toggle button (Fit / Crop / Stretch / 16:9 / 4:3) with smooth animated state transitions.
+  - Speed selector chip (0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 2.0x, 3.0x) showing active `atempo` state.
+  - Subtitle track & Audio track selection menus parsed dynamically from native demuxer JSON output.
+  - Hardware/Software acceleration chip (`HW (MediaCodec)` vs `SW (FFmpeg)`).
 
 ---
 
-### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+## 3. Key Product Decisions & Trade-Offs
+
+1. **EGL / GLES Shader Rendering vs CPU `sws_scale`**:
+   - *Chosen Approach*: EGL window surface with GLSL YUV2RGB shaders (Y, U, V luminance/chrominance texture uploading).
+   - *Why*: Completely eliminates CPU copy bottlenecks and stride alignment crashes (`__memcpy_aarch64_simd` fault) on odd-resolution screen recordings.
+2. **FFmpeg `atempo` Filter Graph for Speed Control**:
+   - *Chosen Approach*: Construct a dynamic `AVFilterGraph` containing `atempo` filters for AAudio output.
+   - *Why*: Prevents high-pitched "chipmunk" or low-pitched audio distortion when playing at non-1.0x speeds.
+3. **`hwcontext_mediacodec` with SW Fallback**:
+   - *Chosen Approach*: Attempt `av_hwdevice_ctx_create` for MediaCodec first; if `avcodec_open2` or `avcodec_send_packet` fails, seamlessly fall back to software CPU decoding.
+   - *Why*: Guarantees playability across all Android devices and unusual codec profiles.
+
+---
+
+## 4. Technical Architecture & Data Strategy
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                              SNORA APP                                 │
-│                           (arc.snora)                                  │
-├────────────────────────────────────────────────────────────────────────┤
-│ Navigation: Home | Videos | Folders | History | Favorites | Settings   │
-│ Media Repository: MediaStore ContentResolver & File Tree Traversal     │
-│ Local Database (Room): Resume Positions, History, Bookmarks            │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ implementation(project(":player"))
-┌───────────────────────────────────▼────────────────────────────────────┐
-│                            PLAYER MODULE                               │
-│                         (arc.snora.player)                             │
-├────────────────────────────────────────────────────────────────────────┤
-│ SnoraPlayer (High-level API)  │ PlayerController (Playback Logic)      │
-│ PlayerView (Surface / Texture)│ SubtitleManager & AudioManager         │
-│ AspectRatio & Speed Handlers  │ GestureOverlay (Brightness / Volume)   │
-├────────────────────────────────────────────────────────────────────────┤
-│ JNI Bridge Wrapper Layer      │ MPV Event Loop & Property Dispatcher   │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ System.loadLibrary()
-┌───────────────────────────────────▼────────────────────────────────────┐
-│                       PRECOMPILED NATIVE LIBS                          │
-│                      (arm64-v8a / armeabi-v7a)                         │
-├────────────────────────────────────────────────────────────────────────┤
-│ libmpv.so                     │ libplayer.so                           │
-│ libavcodec.so                 │ libavformat.so                         │
-│ libavutil.so                  │ libswresample.so                       │
-│ libswscale.so                 │ libavfilter.so                         │
-│ libass.so                     │ libdav1d.so                            │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Jetpack Compose UI (Kotlin)                         │
+│   ┌────────────────────┐  ┌─────────────────────┐  ┌────────────────────┐   │
+│   │ SnoraPlayer        │  │ Audio/Subtitle Track│  │ Aspect Ratio /     │   │
+│   │ Controller State   │  │ Selectors           │  │ Zoom Matrix Controls│   │
+│   └─────────┬──────────┘  └──────────┬──────────┘  └─────────┬──────────┘   │
+└─────────────│────────────────────────│───────────────────────│──────────────┘
+              │ JNI Calls              │ JNI Tracks JSON       │ JNI Params
+              ▼                        ▼                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          C++ Native JNI Engine                              │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                          Demuxer Thread                               │  │
+│  │   • avformat_open_input / av_read_frame                               │  │
+│  │   • Handles Seek Requests & Flushes Queues                            │  │
+│  └──────────────┬─────────────────────────────────────┬──────────────────┘  │
+│                 │ AVPacket                            │ AVPacket            │
+│                 ▼                                     ▼                     │
+│  ┌─────────────────────────────┐       ┌─────────────────────────────┐      │
+│  │     Video Queue & Decoder   │       │     Audio Queue & Decoder   │      │
+│  │  • MediaCodec / SW Decoder  │       │  • AVCodec / libavfilter    │      │
+│  │  • YUV Frame Decoding       │       │  • atempo Pitch Filter      │      │
+│  │  • Subtitle Overlay Frame   │       │  • AAudio Stream Output     │      │
+│  └──────────────┬──────────────┘       └──────────────┬──────────────┘      │
+│                 │ Decoded YUV                         │ Audio Clock Sync    │
+│                 ▼                                     ▼                     │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    EGL / GLES 2.0 Render Thread                       │  │
+│  │  • Y, U, V Texture Uploading (GL_LUMINANCE)                           │  │
+│  │  • GPU YUV-to-RGB Fragment Shader Conversion                          │  │
+│  │  • Aspect Ratio Matrix Transformations (Fit/Crop/Stretch/Zoom)        │  │
+│  │  • Alpha-Blended Subtitle Texture Overlay                             │  │
+│  │  • eglSwapBuffers onto ANativeWindow                                  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Core Data Models & State
-- `VideoMediaItem`: ID, title, URI, file path, duration, resolution, size, date modified, thumbnail URI, last playback position.
-- `PlaybackState`: Idle, Buffering, Playing, Paused, Completed, Error(code, message).
-- `TrackInfo`: Track ID, track type (Audio, Subtitle, Video), language, title, codec, isSelected.
-- `PlayerPreferences`: Hardware decoding mode (`auto`, `mediacodec`, `sw`), subtitle font size, audio delay, aspect ratio mode (`fit`, `crop`, `stretch`, `16:9`, `4:3`).
+### Native Implementation Requirements
 
-#### Interactive Component & State Mapping
-- `PlayerControls`: Exposes play/pause toggle, seek slider with real-time scrub preview, 10-second skip buttons, track selection dialogs, and control lock.
-- `GestureDetector`: Handles vertical drag on left/right halves for brightness/volume and horizontal drag for fast seek with on-screen HUD feedback.
-- `TrackSelectionSheet`: Modal bottom sheet listing embedded and external subtitles and audio tracks with single-tap activation.
-- `FolderBrowser`: LazyColumn file explorer navigating directories with breadcrumbs and direct video launching.
-
----
-
-### 5. Step-by-Step Implementation Strategy
-
-1. **Native Libraries Acquisition & Placement**:
-   - Download the precompiled FFmpeg artifacts (`ffmpeg.zip`) from the latest release of `NEWWFFMCREATEE`.
-   - Extract and position the shared libraries for `arm64-v8a` and `armeabi-v7a` into the project's native library directories.
-   - Configure Gradle `jniLibs.srcDirs` to package the native libraries without running any FFmpeg compilation tasks.
-2. **Project Modularization**:
-   - Update `settings.gradle.kts` to include `:app` and `:player`.
-   - Create the `:player` Android Library module with its own `build.gradle.kts`, JNI bridge, and playback controllers.
-   - Configure `:app` to depend on `:player`.
-3. **Player Core Implementation (`arc.snora.player`)**:
-   - Implement `SnoraPlayer`, `PlayerController`, `PlayerView`, `SubtitleManager`, `AudioManager`, and `PlaybackState`.
-   - Wire hardware acceleration selection, aspect ratio manipulation, track inspection, and event handling.
-4. **App UI & Navigation Implementation (`arc.snora`)**:
-   - Implement M3 Material You themed scaffold with bottom navigation.
-   - Build **Videos**, **Folders**, **History**, **Favorites**, and **Settings** screens.
-   - Integrate `SnoraPlayerView` in full-screen immersive mode with gestures and HUD controls.
-5. **Storage & Media Indexing**:
-   - Integrate `MediaStore` querying for on-device videos with thumbnail loading and duration formatting.
-   - Implement Room database for persistent playback resume positions and watch history.
-6. **Rebranding & Verification**:
-   - Configure application ID `arc.snora`, app name "SNORA", and output APK target `SNORA.apk`.
-   - Verify compilation using `compile_applet` and inspect dependencies and packaging.
+1. **`CMakeLists.txt`**: Link `EGL`, `GLESv2`, `GLESv3`, `android`, `log`, `z`, `aaudio`, and FFmpeg shared libraries (`avformat`, `avcodec`, `avutil`, `swscale`, `swresample`, `avfilter`, `avdevice`).
+2. **`snora-player.cpp`**:
+   - **EGL Context**: Initialize `eglGetDisplay`, `eglInitialize`, `eglCreateWindowSurface` for `ANativeWindow`.
+   - **Shaders**: Compile Vertex Shader (with transformation matrix `uMVPMatrix`) and Fragment Shader (YUV420P to RGBA color space conversion).
+   - **Audio `atempo` Filter**: Setup `AVFilterGraph` with `abuffer` -> `atempo` -> `abuffersink` for pitch-preserving speed changes.
+   - **MediaCodec HW Context**: Try `av_hwdevice_ctx_create(..., AV_HWDEVICE_TYPE_MEDIACODEC, ...)` for HW acceleration.
+   - **Native Seek & Sync**: Flush packet queues, reset PTS clocks, perform `av_seek_frame(..., AVSEEK_FLAG_BACKWARD)`.
+   - **Subtitle Overlay**: Decode `AVSubtitle` rectangles and render text/bitmap texture on GLES overlay quad.
+3. **`SnoraNativeEngine.kt`**: Expose `setSpeed`, `setAspectRatioMode`, `setZoom`, `setHardwareAccelerationEnabled`, `seekTo`, `setAudioTrack`, `setSubtitleTrack`.
+4. **`SnoraPlayer.kt`**: Connect Compose state flows to native engine methods.

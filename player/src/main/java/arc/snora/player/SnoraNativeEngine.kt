@@ -46,6 +46,14 @@ object SnoraNativeEngine {
 
     external fun seekTo(positionMs: Long)
 
+    external fun setSpeed(speed: Float)
+
+    external fun setAspectRatioMode(mode: Int)
+
+    external fun setZoom(zoom: Float)
+
+    external fun setHardwareAccelerationEnabled(enabled: Boolean)
+
     external fun getDurationMs(): Long
 
     external fun getCurrentPositionMs(): Long

@@ -187,12 +187,11 @@ class SnoraPlayer(private val context: Context) {
                 val dur = SnoraNativeEngine.getDurationMs()
                 val pos = SnoraNativeEngine.getCurrentPositionMs()
                 val isPlaying = SnoraNativeEngine.isPlaying()
-                
-                // Fetch dynamic native dimensions
+
                 val w = SnoraNativeEngine.getVideoWidth()
                 val h = SnoraNativeEngine.getVideoHeight()
                 val currentInfo = _playbackState.value.videoInfo
-                
+
                 var newInfo = currentInfo
                 if (w > 0 && h > 0 && (currentInfo.width != w || currentInfo.height != h)) {
                     newInfo = currentInfo.copy(width = w, height = h)
@@ -208,7 +207,6 @@ class SnoraPlayer(private val context: Context) {
             }
         }
     }
-
 
     fun pause() {
         if (isNativePlaying && SnoraNativeEngine.isLoaded) {
@@ -286,9 +284,14 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun setSpeed(speed: Float) {
+        val clamped = speed.coerceIn(0.25f, 4.0f)
+        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
+            SnoraNativeEngine.setSpeed(clamped)
+            _playbackState.value = _playbackState.value.copy(speed = clamped)
+            return
+        }
         try {
             val player = mediaPlayer ?: return
-            val clamped = speed.coerceIn(0.25f, 4.0f)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val params = player.playbackParams ?: PlaybackParams()
                 params.speed = clamped
@@ -297,6 +300,34 @@ class SnoraPlayer(private val context: Context) {
             _playbackState.value = _playbackState.value.copy(speed = clamped)
         } catch (e: Exception) {
         }
+    }
+
+    fun setAspectRatioMode(mode: AspectRatioMode) {
+        val modeInt = when (mode) {
+            AspectRatioMode.FIT -> 0
+            AspectRatioMode.CROP -> 1
+            AspectRatioMode.STRETCH -> 2
+            else -> 0
+        }
+        if (SnoraNativeEngine.isLoaded) {
+            SnoraNativeEngine.setAspectRatioMode(modeInt)
+        }
+        _playbackState.value = _playbackState.value.copy(aspectRatioMode = mode)
+    }
+
+    fun setZoom(zoom: Float) {
+        val clamped = zoom.coerceIn(0.5f, 3.0f)
+        if (SnoraNativeEngine.isLoaded) {
+            SnoraNativeEngine.setZoom(clamped)
+        }
+    }
+
+    fun setHardwareAccelerationEnabled(enabled: Boolean) {
+        if (SnoraNativeEngine.isLoaded) {
+            SnoraNativeEngine.setHardwareAccelerationEnabled(enabled)
+        }
+        val mode = if (enabled) HwDecMode.AUTO else HwDecMode.SW
+        _playbackState.value = _playbackState.value.copy(hwDecMode = mode)
     }
 
     fun setControlsLocked(locked: Boolean) {

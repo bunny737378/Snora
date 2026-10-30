@@ -38,6 +38,9 @@ target_link_libraries(snora_player
     swresample
     avfilter
     avdevice
+    EGL
+    GLESv2
+    GLESv3
     android
     aaudio
     log
