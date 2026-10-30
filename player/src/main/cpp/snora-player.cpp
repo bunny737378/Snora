@@ -44,6 +44,7 @@ static ANativeWindow* g_nativeWindow = nullptr;
 static pthread_mutex_t g_windowMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static std::atomic<bool> g_isPlaying(false);
+static std::atomic<bool> g_endOfStream(false);
 static std::thread g_demuxThread;
 
 static std::atomic<int64_t> g_currentPositionMs(0);
@@ -89,6 +90,7 @@ static std::mutex g_subTextMutex;
 struct MyPacket {
     AVPacket* pkt;
     bool is_flush;
+    bool is_eof = false;
 };
 
 class PacketQueue {
@@ -102,6 +104,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (abort_request) return;
         AVPacket* p = av_packet_alloc();
+        if (!p) return;
         av_packet_move_ref(p, pkt);
         q.push({p, false});
         cond.notify_one();
@@ -110,6 +113,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         if (abort_request) return;
         q.push({nullptr, true});
+        cond.notify_one();
+    }
+    void put_eof() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (abort_request) return;
+        q.push({nullptr, false, true});
         cond.notify_one();
     }
     int get(MyPacket& mypkt) {
@@ -135,7 +144,17 @@ public:
     }
     void start() {
         std::lock_guard<std::mutex> lock(mutex);
+        while (!q.empty()) {
+            MyPacket mp = q.front();
+            q.pop();
+            if (mp.pkt) av_packet_free(&mp.pkt);
+        }
         abort_request = false;
+    }
+
+    size_t size() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return q.size();
     }
 };
 
@@ -402,12 +421,15 @@ static void videoDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         if (!glInitialized) {
             glInitialized = initGL();
             if (!glInitialized) {
+                if (g_endOfStream) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 continue;
             }
         }
 
         if (g_videoQueue.get(mp) < 0) break;
+
+        if (mp.is_eof) break;
 
         if (mp.is_flush) {
             avcodec_flush_buffers(codecCtx);
@@ -542,6 +564,8 @@ static void subtitleDecoderThread(AVCodecContext* codecCtx, int streamIdx) {
     while (g_isPlaying) {
         if (g_subtitleQueue.get(mp) < 0) break;
 
+        if (mp.is_eof) break;
+
         if (mp.is_flush) {
             std::lock_guard<std::mutex> lock(g_subOverlayMutex);
             g_subOverlay.active = false;
@@ -647,14 +671,30 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
     setupAudioFilter(g_playbackSpeed.load());
 
     AAudioStreamBuilder* builder = nullptr;
-    AAudio_createStreamBuilder(&builder);
-    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
-    AAudioStreamBuilder_setChannelCount(builder, 2);
-    AAudioStreamBuilder_setSampleRate(builder, 48000);
-    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_openStream(builder, &aaudioStream);
-    AAudioStreamBuilder_delete(builder);
-    AAudioStream_requestStart(aaudioStream);
+    aaudio_result_t builderResult = AAudio_createStreamBuilder(&builder);
+    if (builderResult == AAUDIO_OK && builder) {
+        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+        AAudioStreamBuilder_setChannelCount(builder, 2);
+        AAudioStreamBuilder_setSampleRate(builder, 48000);
+        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+        aaudio_result_t openResult = AAudioStreamBuilder_openStream(builder, &aaudioStream);
+        AAudioStreamBuilder_delete(builder);
+        if (openResult == AAUDIO_OK && aaudioStream) {
+            aaudio_result_t startResult = AAudioStream_requestStart(aaudioStream);
+            if (startResult != AAUDIO_OK) {
+                LOGE("AAudio stream start failed: %d", startResult);
+                AAudioStream_close(aaudioStream);
+                aaudioStream = nullptr;
+            }
+        } else {
+            LOGE("AAudio stream open failed: %d", openResult);
+            if (aaudioStream) AAudioStream_close(aaudioStream);
+            aaudioStream = nullptr;
+        }
+    } else {
+        LOGE("AAudio builder creation failed: %d", builderResult);
+        if (builder) AAudioStreamBuilder_delete(builder);
+    }
 
     MyPacket mp;
     while (g_isPlaying) {
@@ -664,6 +704,8 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         }
 
         if (g_audioQueue.get(mp) < 0) break;
+
+        if (mp.is_eof) break;
 
         if (mp.is_flush) {
             avcodec_flush_buffers(codecCtx);
@@ -707,6 +749,7 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
 static void demuxPlaybackWorker(std::string videoUrl) {
     g_videoWidth.store(0);
     g_videoHeight.store(0);
+    g_endOfStream = false;
     g_videoQueue.start();
     g_audioQueue.start();
     g_subtitleQueue.start();
@@ -857,6 +900,7 @@ static void demuxPlaybackWorker(std::string videoUrl) {
     }
 
     AVPacket* pkt = av_packet_alloc();
+    bool reachedEof = false;
     while (g_isPlaying) {
         int reqAudio = g_requestedAudioStreamIndex.exchange(-2);
         if (reqAudio >= -1) {
@@ -887,14 +931,24 @@ static void demuxPlaybackWorker(std::string videoUrl) {
             g_currentPositionMs.store(targetSeek);
         }
 
-        if (g_videoQueue.q.size() > 50 || g_audioQueue.q.size() > 100) {
+        if (g_videoQueue.size() > 50 || g_audioQueue.size() > 100) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        if (av_read_frame(formatCtx, pkt) < 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
+        int readResult = av_read_frame(formatCtx, pkt);
+        if (readResult < 0) {
+            if (readResult == AVERROR_EOF) {
+                g_currentPositionMs.store(g_durationMs.load());
+                g_endOfStream = true;
+                g_videoQueue.put_eof();
+                g_audioQueue.put_eof();
+                g_subtitleQueue.put_eof();
+                reachedEof = true;
+            } else {
+                g_isPlaying = false;
+            }
+            break;
         }
 
         if (pkt->stream_index == vIdx) g_videoQueue.put(pkt);
@@ -905,13 +959,16 @@ static void demuxPlaybackWorker(std::string videoUrl) {
     }
     av_packet_free(&pkt);
 
-    g_videoQueue.abort();
-    g_audioQueue.abort();
-    g_subtitleQueue.abort();
+    if (!reachedEof) {
+        g_videoQueue.abort();
+        g_audioQueue.abort();
+        g_subtitleQueue.abort();
+    }
 
     if (vThread.joinable()) vThread.join();
     if (aThread.joinable()) aThread.join();
     if (subThread.joinable()) subThread.join();
+    if (reachedEof) g_isPlaying = false;
 
     if (vCtx) avcodec_free_context(&vCtx);
     if (aCtx) avcodec_free_context(&aCtx);
@@ -934,7 +991,7 @@ JNIEXPORT void JNICALL Java_arc_snora_player_SnoraNativeEngine_setSurface(JNIEnv
 }
 
 JNIEXPORT void JNICALL Java_arc_snora_player_SnoraNativeEngine_playVideo(JNIEnv* env, jobject thiz, jstring jurl) {
-    if (g_isPlaying) {
+    if (g_demuxThread.joinable()) {
         g_isPlaying = false;
         g_videoQueue.abort();
         g_audioQueue.abort();

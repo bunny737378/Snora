@@ -205,7 +205,11 @@ class SnoraPlayer(private val context: Context) {
                     positionMs = pos,
                     currentSubtitleText = subText,
                     videoInfo = newInfo,
-                    status = if (isPlaying) PlaybackStatus.PLAYING else PlaybackStatus.PAUSED
+                    status = when {
+                        isPlaying -> PlaybackStatus.PLAYING
+                        dur > 0 && pos >= dur -> PlaybackStatus.ENDED
+                        else -> PlaybackStatus.PAUSED
+                    }
                 )
                 delay(250)
             }
