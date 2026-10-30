@@ -187,16 +187,28 @@ class SnoraPlayer(private val context: Context) {
                 val dur = SnoraNativeEngine.getDurationMs()
                 val pos = SnoraNativeEngine.getCurrentPositionMs()
                 val isPlaying = SnoraNativeEngine.isPlaying()
+                
+                // Fetch dynamic native dimensions
+                val w = SnoraNativeEngine.getVideoWidth()
+                val h = SnoraNativeEngine.getVideoHeight()
+                val currentInfo = _playbackState.value.videoInfo
+                
+                var newInfo = currentInfo
+                if (w > 0 && h > 0 && (currentInfo.width != w || currentInfo.height != h)) {
+                    newInfo = currentInfo.copy(width = w, height = h)
+                }
 
                 _playbackState.value = _playbackState.value.copy(
                     durationMs = if (dur > 0) dur else _playbackState.value.durationMs,
                     positionMs = pos,
+                    videoInfo = newInfo,
                     status = if (isPlaying) PlaybackStatus.PLAYING else PlaybackStatus.PAUSED
                 )
                 delay(250)
             }
         }
     }
+
 
     fun pause() {
         if (isNativePlaying && SnoraNativeEngine.isLoaded) {

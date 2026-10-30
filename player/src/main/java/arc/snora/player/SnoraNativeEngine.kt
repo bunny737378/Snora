@@ -56,6 +56,10 @@ object SnoraNativeEngine {
 
     external fun setAudioTrack(streamIndex: Int)
 
+    external fun getVideoWidth(): Int
+
+    external fun getVideoHeight(): Int
+
     external fun setSubtitleTrack(streamIndex: Int)
 
     fun getAvailableTracks(): List<TrackItem> {
