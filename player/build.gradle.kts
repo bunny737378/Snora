@@ -13,6 +13,18 @@ android {
     ndk {
       abiFilters += listOf("arm64-v8a", "armeabi-v7a")
     }
+    externalNativeBuild {
+      cmake {
+        cppFlags += "-std=c++17"
+        arguments += "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+    }
   }
 
   compileOptions {
