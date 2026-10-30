@@ -28,18 +28,15 @@ class SnoraPlayer(private val context: Context) {
     private var mediaPlayer: MediaPlayer? = null
     private var currentSurface: Surface? = null
     private var progressJob: Job? = null
-    private var currentUri: String = ""
+    private var currentPathOrUri: String = ""
 
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
     val videoRenderer = VideoRenderer(this)
 
     init {
-        val ffmpegReady = FFmpegBridge.isLoaded
-        if (ffmpegReady) {
-            _playbackState.value = _playbackState.value.copy(
-                videoInfo = VideoInfo(hwdecActive = "FFmpeg HW / MediaCodec")
-            )
+        playerScope.launch {
+            FFmpegEngine.initialize(context)
         }
     }
 
@@ -104,7 +101,7 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
-        currentUri = pathOrUri
+        currentPathOrUri = pathOrUri
         val player = getOrCreateMediaPlayer()
         try {
             progressJob?.cancel()
@@ -138,6 +135,13 @@ class SnoraPlayer(private val context: Context) {
                     startProgressTracker()
                 }
             }
+
+            playerScope.launch {
+                val probedTracks = FFmpegEngine.probeMedia(pathOrUri)
+                if (probedTracks.isNotEmpty()) {
+                    _playbackState.value = _playbackState.value.copy(tracks = probedTracks)
+                }
+            }
         } catch (t: Throwable) {
             _playbackState.value = _playbackState.value.copy(
                 status = PlaybackStatus.ERROR,
@@ -149,9 +153,7 @@ class SnoraPlayer(private val context: Context) {
     fun pause() {
         try {
             mediaPlayer?.let {
-                if (it.isPlaying) {
-                    it.pause()
-                }
+                if (it.isPlaying) it.pause()
             }
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
         } catch (e: Exception) {
@@ -227,10 +229,26 @@ class SnoraPlayer(private val context: Context) {
                 currentTracks.filter { it.type == type && it.isSelected }.forEach {
                     player.deselectTrack(it.id)
                 }
+                if (type == TrackType.SUBTITLE) {
+                    _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = -1)
+                }
             } else {
                 player.selectTrack(trackIndex)
+                if (type == TrackType.AUDIO) {
+                    _playbackState.value = _playbackState.value.copy(selectedAudioTrackId = trackIndex)
+                } else if (type == TrackType.SUBTITLE) {
+                    _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = trackIndex)
+                }
             }
-            refreshTracks()
+
+            val updatedTracks = _playbackState.value.tracks.map { track ->
+                if (track.type == type) {
+                    track.copy(isSelected = (track.id == trackIndex))
+                } else {
+                    track
+                }
+            }
+            _playbackState.value = _playbackState.value.copy(tracks = updatedTracks)
         } catch (e: Exception) {
         }
     }
@@ -256,7 +274,12 @@ class SnoraPlayer(private val context: Context) {
                     val codec = format?.getString("mime") ?: "standard"
                     val title = "Track ${index + 1} ($lang)"
 
-                    val isSelected = false
+                    val isSelected = if (trackType == TrackType.AUDIO) {
+                        index == _playbackState.value.selectedAudioTrackId || (_playbackState.value.selectedAudioTrackId == -1 && trackList.none { it.type == TrackType.AUDIO })
+                    } else {
+                        index == _playbackState.value.selectedSubtitleTrackId
+                    }
+
                     trackList.add(
                         TrackItem(
                             id = index,
@@ -269,7 +292,9 @@ class SnoraPlayer(private val context: Context) {
                     )
                 }
             }
-            _playbackState.value = _playbackState.value.copy(tracks = trackList)
+            if (trackList.isNotEmpty()) {
+                _playbackState.value = _playbackState.value.copy(tracks = trackList)
+            }
         } catch (e: Exception) {
         }
     }

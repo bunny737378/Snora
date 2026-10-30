@@ -1,5 +1,8 @@
 package arc.snora.library
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,8 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VideocamOff
@@ -23,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,23 +47,19 @@ import arc.snora.ui.VideoCard
 @Composable
 fun VideosScreen(
     videos: List<VideoItem>,
-    favorites: Set<String>,
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
-    onToggleFavorite: (VideoItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
     val filteredVideos = remember(videos, searchQuery) {
         if (searchQuery.isBlank()) {
             videos
         } else {
-            videos.filter {
-                it.title.contains(searchQuery, ignoreCase = true) ||
-                it.folderName.contains(searchQuery, ignoreCase = true)
-            }
+            videos.filter { it.title.contains(searchQuery, ignoreCase = true) }
         }
     }
 
@@ -73,52 +75,59 @@ fun VideosScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Column {
-                Text(
-                    text = "Videos",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Text(
-                    text = "${filteredVideos.size} media files",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
-            }
+            Text(
+                text = "Videos",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
 
-            IconButton(
-                onClick = onRefresh,
-                modifier = Modifier.testTag("refresh_videos_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Refresh Videos",
-                    tint = MaterialTheme.colorScheme.primary
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { isSearchActive = !isSearchActive },
+                    modifier = Modifier.testTag("videos_search_toggle")
+                ) {
+                    Icon(
+                        imageVector = if (isSearchActive) Icons.Default.Close else Icons.Default.Search,
+                        contentDescription = "Search Videos"
+                    )
+                }
+
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.testTag("refresh_videos_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh Videos",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
 
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)
-                .testTag("video_search_field"),
-            placeholder = { Text("Search title or folder...") },
-            leadingIcon = {
-                Icon(imageVector = Icons.Default.Search, contentDescription = null)
-            },
-            trailingIcon = {
-                if (searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { searchQuery = "" }) {
-                        Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear")
-                    }
-                }
-            },
-            singleLine = true
-        )
+        AnimatedVisibility(
+            visible = isSearchActive,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search video title...", fontSize = 13.sp) },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = Color(0x33FFFFFF)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .padding(bottom = 8.dp)
+                    .testTag("video_search_input")
+            )
+        }
 
         if (isLoading) {
             Box(
@@ -149,25 +158,18 @@ fun VideosScreen(
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                     )
-                    Text(
-                        text = "Videos on your device storage will show here",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
-                    )
                 }
             }
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = 8.dp, bottom = 80.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 items(filteredVideos, key = { it.id }) { video ->
                     VideoCard(
                         video = video,
-                        isFavorite = favorites.contains(video.uriString),
-                        onPlay = { onPlayVideo(video) },
-                        onToggleFavorite = { onToggleFavorite(video) }
+                        onPlay = { onPlayVideo(video) }
                     )
                 }
             }

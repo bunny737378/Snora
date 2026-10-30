@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.media.AudioManager as AndroidAudioManager
 import android.provider.Settings
-import android.view.WindowManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,12 +42,23 @@ class PlayerController(
 
     private var autoHideJob: Job? = null
     private var gestureHideJob: Job? = null
+    private var isScrubbing: Boolean = false
 
     private val systemAudioManager =
         context.getSystemService(Context.AUDIO_SERVICE) as? AndroidAudioManager
 
     init {
         scheduleAutoHide()
+    }
+
+    fun setScrubbing(scrubbing: Boolean) {
+        isScrubbing = scrubbing
+        if (scrubbing) {
+            autoHideJob?.cancel()
+            _isHudVisible.value = true
+        } else {
+            scheduleAutoHide()
+        }
     }
 
     fun toggleHudVisibility() {
@@ -67,19 +77,24 @@ class PlayerController(
 
     fun showHud() {
         _isHudVisible.value = true
-        scheduleAutoHide()
+        if (!isScrubbing) {
+            scheduleAutoHide()
+        }
     }
 
     fun hideHud() {
-        _isHudVisible.value = false
-        autoHideJob?.cancel()
+        if (!isScrubbing) {
+            _isHudVisible.value = false
+            autoHideJob?.cancel()
+        }
     }
 
     fun scheduleAutoHide() {
+        if (isScrubbing) return
         autoHideJob?.cancel()
         autoHideJob = scope.launch {
             delay(3500)
-            if (!player.playbackState.value.isControlsLocked) {
+            if (!player.playbackState.value.isControlsLocked && !isScrubbing) {
                 _isHudVisible.value = false
             }
         }
@@ -99,10 +114,10 @@ class PlayerController(
         systemAudioManager?.let { am ->
             val max = am.getStreamMaxVolume(AndroidAudioManager.STREAM_MUSIC)
             val current = am.getStreamVolume(AndroidAudioManager.STREAM_MUSIC)
-            val deltaSteps = (deltaPercent * max).toInt()
-            val target = (current + deltaSteps).coerceIn(0, max)
+            val deltaSteps = (deltaPercent * max * 1.5f).toInt()
+            val target = (current + (if (deltaSteps == 0) (if (deltaPercent > 0) 1 else -1) else deltaSteps)).coerceIn(0, max)
             am.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, target, 0)
-            val pct = target.toFloat() / max.toFloat()
+            val pct = target.toFloat() / max.toFloat().coerceAtLeast(1f)
             showGestureOverlay(
                 GestureIconType.VOLUME,
                 "${(pct * 100).toInt()}%",
@@ -145,7 +160,7 @@ class PlayerController(
         )
         gestureHideJob?.cancel()
         gestureHideJob = scope.launch {
-            delay(1000)
+            delay(1200)
             _gestureState.value = _gestureState.value.copy(isVisible = false)
         }
     }

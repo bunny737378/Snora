@@ -15,8 +15,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.AlertDialog
@@ -25,7 +23,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,7 +49,6 @@ fun SettingsScreen(
     var showHwDecDialog by remember { mutableStateOf(false) }
     var backgroundPlayEnabled by remember { mutableStateOf(false) }
     var keepScreenOnEnabled by remember { mutableStateOf(true) }
-    var showAboutDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -63,7 +59,7 @@ fun SettingsScreen(
     ) {
         Text(
             text = "Settings",
-            fontSize = 24.sp,
+            fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
         )
@@ -97,7 +93,7 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Hardware Decoding",
+                        text = "Decoder Engine",
                         fontWeight = FontWeight.Medium,
                         fontSize = 15.sp
                     )
@@ -196,55 +192,13 @@ fun SettingsScreen(
             }
         }
 
-        Text(
-            text = "About",
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary
-        )
-
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .clickable { showAboutDialog = true }
-                .testTag("about_snora_card"),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "About SNORA",
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 15.sp
-                    )
-                    Text(
-                        text = "Version 1.0 • Engine specifications",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
-            }
-        }
-
         Spacer(modifier = Modifier.height(80.dp))
     }
 
     if (showHwDecDialog) {
         AlertDialog(
             onDismissRequest = { showHwDecDialog = false },
-            title = { Text("Default Hardware Decoder") },
+            title = { Text("Decoder Engine Selection") },
             text = {
                 Column {
                     HwDecMode.values().forEach { mode ->
@@ -274,32 +228,6 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = { showHwDecDialog = false }) {
                     Text("Close")
-                }
-            }
-        )
-    }
-
-    if (showAboutDialog) {
-        AlertDialog(
-            onDismissRequest = { showAboutDialog = false },
-            title = { Text("SNORA Video Player") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Application: SNORA 1.0 (arc.snora)")
-                    Text("Core Engine: MPV media playback engine")
-                    Text("FFmpeg Suite: Custom Ultimate Android Build")
-                    Text("Supported Architectures: arm64-v8a, armeabi-v7a")
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        "Integrated Codecs: Dolby TrueHD, Atmos, DTS-HD, FLAC, Opus, HEVC 10-bit HDR, AV1, VP9, RealVideo, SSA/ASS subtitles.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showAboutDialog = false }) {
-                    Text("OK")
                 }
             }
         )

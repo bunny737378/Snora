@@ -23,11 +23,9 @@ enum class AspectRatioMode(val label: String) {
     RATIO_4_3("4:3")
 }
 
-enum class HwDecMode(val mpvValue: String, val label: String) {
-    AUTO("auto", "Hardware (Auto)"),
-    MEDIACODEC("mediacodec", "MediaCodec HW"),
-    MEDIACODEC_COPY("mediacodec-copy", "MediaCodec Copy"),
-    SW("no", "Software (CPU)")
+enum class HwDecMode(val value: String, val label: String) {
+    AUTO("auto", "Auto (Hardware + SW Fallback)"),
+    SW("sw", "Software (SW Decoders Only)")
 }
 
 data class TrackItem(
@@ -46,7 +44,7 @@ data class VideoInfo(
     val videoCodec: String = "",
     val audioCodec: String = "",
     val fps: Double = 0.0,
-    val hwdecActive: String = ""
+    val hwdecActive: String = "Auto (MediaCodec)"
 )
 
 data class PlaybackState(
@@ -60,9 +58,12 @@ data class PlaybackState(
     val subDelaySec: Double = 0.0,
     val subScale: Float = 1.0f,
     val isControlsLocked: Boolean = false,
+    val isScrubbing: Boolean = false,
     val aspectRatioMode: AspectRatioMode = AspectRatioMode.FIT,
     val hwDecMode: HwDecMode = HwDecMode.AUTO,
     val tracks: List<TrackItem> = emptyList(),
+    val selectedAudioTrackId: Int = -1,
+    val selectedSubtitleTrackId: Int = -1,
     val videoInfo: VideoInfo = VideoInfo(),
     val errorMessage: String? = null
 )

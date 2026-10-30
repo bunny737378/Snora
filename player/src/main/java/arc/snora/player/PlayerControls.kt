@@ -1,16 +1,21 @@
 package arc.snora.player
 
+import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,10 +28,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BrightnessMedium
-import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -35,12 +41,9 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
-import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
@@ -60,6 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,65 +91,61 @@ fun PlayerControls(
     onSubDelayAdjust: (Double) -> Unit,
     onAudioDelayAdjust: (Double) -> Unit,
     onHwDecChange: (HwDecMode) -> Unit,
+    onScrubbingChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var showTrackDialog by remember { mutableStateOf(false) }
-    var showInfoDialog by remember { mutableStateOf(false) }
-    var showSpeedDialog by remember { mutableStateOf(false) }
+    var activeMenu by remember { mutableStateOf<String?>(null) }
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     Box(modifier = modifier.fillMaxSize()) {
         AnimatedVisibility(
-            visible = gestureState.isVisible,
+            visible = gestureState.isVisible && gestureState.iconType == GestureIconType.BRIGHTNESS,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 24.dp)
+        ) {
+            VerticalGesturePill(
+                icon = Icons.Default.BrightnessMedium,
+                text = gestureState.text,
+                progress = gestureState.progress
+            )
+        }
+
+        AnimatedVisibility(
+            visible = gestureState.isVisible && gestureState.iconType == GestureIconType.VOLUME,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 24.dp)
+        ) {
+            VerticalGesturePill(
+                icon = Icons.AutoMirrored.Filled.VolumeUp,
+                text = gestureState.text,
+                progress = gestureState.progress
+            )
+        }
+
+        AnimatedVisibility(
+            visible = gestureState.isVisible && gestureState.iconType == GestureIconType.SEEK,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier.align(Alignment.Center)
         ) {
             Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = Color(0xCC1A1A24),
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xCC111318),
                 contentColor = Color.White
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    when (gestureState.iconType) {
-                        GestureIconType.VOLUME -> Icon(
-                            imageVector = Icons.Default.VolumeUp,
-                            contentDescription = "Volume",
-                            modifier = Modifier.size(36.dp)
-                        )
-                        GestureIconType.BRIGHTNESS -> Icon(
-                            imageVector = Icons.Default.BrightnessMedium,
-                            contentDescription = "Brightness",
-                            modifier = Modifier.size(36.dp)
-                        )
-                        GestureIconType.SEEK -> Icon(
-                            imageVector = Icons.Default.FastForward,
-                            contentDescription = "Seek",
-                            modifier = Modifier.size(36.dp)
-                        )
-                        GestureIconType.NONE -> {}
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = gestureState.text,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
-                    )
-                    if (gestureState.iconType != GestureIconType.SEEK && gestureState.progress > 0f) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        LinearProgressIndicator(
-                            progress = { gestureState.progress },
-                            modifier = Modifier
-                                .width(100.dp)
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp)),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
+                Text(
+                    text = gestureState.text,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp)
+                )
             }
         }
 
@@ -184,14 +184,14 @@ fun PlayerControls(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x77000000))
+                    .background(Color(0x55000000))
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.TopCenter)
-                        .background(Color(0x99000000))
-                        .padding(horizontal = 8.dp, vertical = 12.dp),
+                        .background(Color(0x88000000))
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
@@ -208,7 +208,7 @@ fun PlayerControls(
                     Text(
                         text = title,
                         color = Color.White,
-                        fontSize = 16.sp,
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -218,7 +218,7 @@ fun PlayerControls(
                     )
 
                     IconButton(
-                        onClick = { showTrackDialog = true },
+                        onClick = { activeMenu = "tracks" },
                         modifier = Modifier.testTag("tracks_button")
                     ) {
                         Icon(
@@ -240,12 +240,12 @@ fun PlayerControls(
                     }
 
                     IconButton(
-                        onClick = { showInfoDialog = true },
+                        onClick = { activeMenu = "info" },
                         modifier = Modifier.testTag("video_info_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Info,
-                            contentDescription = "Video Information",
+                            contentDescription = "Information",
                             tint = Color.White
                         )
                     }
@@ -256,39 +256,20 @@ fun PlayerControls(
                     ) {
                         Icon(
                             imageVector = Icons.Default.LockOpen,
-                            contentDescription = "Lock Controls",
+                            contentDescription = "Lock",
                             tint = Color.White
                         )
                     }
                 }
 
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
+                Box(
+                    modifier = Modifier.align(Alignment.Center),
+                    contentAlignment = Alignment.Center
                 ) {
-                    IconButton(
-                        onClick = { onSeekRelative(-10.0) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .background(Color(0x55000000), CircleShape)
-                            .testTag("rewind_10s")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FastRewind,
-                            contentDescription = "Rewind 10 Seconds",
-                            tint = Color.White,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-
                     IconButton(
                         onClick = onTogglePlayPause,
                         modifier = Modifier
-                            .size(72.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                            .size(64.dp)
                             .testTag("play_pause_button")
                     ) {
                         Icon(
@@ -298,23 +279,8 @@ fun PlayerControls(
                                 Icons.Default.PlayArrow
                             },
                             contentDescription = "Play or Pause",
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(44.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { onSeekRelative(10.0) },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .background(Color(0x55000000), CircleShape)
-                            .testTag("forward_10s")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FastForward,
-                            contentDescription = "Forward 10 Seconds",
                             tint = Color.White,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(52.dp)
                         )
                     }
                 }
@@ -323,13 +289,13 @@ fun PlayerControls(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
-                        .background(Color(0x99000000))
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .background(Color(0x88000000))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    var isScrubbing by remember { mutableStateOf(false) }
+                    var isScrubbingLocal by remember { mutableStateOf(false) }
                     var scrubPosition by remember { mutableStateOf(0f) }
 
-                    val effectivePosition = if (isScrubbing) {
+                    val effectivePosition = if (isScrubbingLocal) {
                         scrubPosition.toLong()
                     } else {
                         state.positionMs
@@ -343,35 +309,38 @@ fun PlayerControls(
                         Text(
                             text = formatTimestamp(effectivePosition),
                             color = Color.White,
-                            fontSize = 13.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
 
                         Text(
                             text = formatTimestamp(state.durationMs),
                             color = Color.LightGray,
-                            fontSize = 13.sp
+                            fontSize = 12.sp
                         )
                     }
 
                     Slider(
                         value = effectivePosition.toFloat().coerceIn(0f, state.durationMs.toFloat().coerceAtLeast(1f)),
                         onValueChange = {
-                            isScrubbing = true
+                            isScrubbingLocal = true
                             scrubPosition = it
+                            onScrubbingChange(true)
                         },
                         onValueChangeFinished = {
-                            isScrubbing = false
+                            isScrubbingLocal = false
+                            onScrubbingChange(false)
                             onSeek(scrubPosition.toLong())
                         },
                         valueRange = 0f..state.durationMs.toFloat().coerceAtLeast(1f),
                         colors = SliderDefaults.colors(
                             thumbColor = MaterialTheme.colorScheme.primary,
                             activeTrackColor = MaterialTheme.colorScheme.primary,
-                            inactiveTrackColor = Color.DarkGray
+                            inactiveTrackColor = Color(0x66FFFFFF)
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(28.dp)
                             .testTag("player_seekbar")
                     )
 
@@ -381,20 +350,20 @@ fun PlayerControls(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
-                            onClick = { showSpeedDialog = true },
+                            onClick = { activeMenu = "speed" },
                             modifier = Modifier.testTag("speed_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Speed,
                                 contentDescription = null,
                                 tint = Color.White,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
                                 text = "${state.speed}x",
                                 color = Color.White,
-                                fontSize = 13.sp
+                                fontSize = 12.sp
                             )
                         }
 
@@ -419,207 +388,343 @@ fun PlayerControls(
                 }
             }
         }
-    }
 
-    if (showSpeedDialog) {
-        AlertDialog(
-            onDismissRequest = { showSpeedDialog = false },
-            title = { Text("Playback Speed") },
-            text = {
-                val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
-                Column {
-                    speeds.forEach { sp ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    onSetSpeed(sp)
-                                    showSpeedDialog = false
-                                }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+        if (activeMenu != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x66000000))
+                    .clickable { activeMenu = null }
+            ) {
+                if (isLandscape) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(340.dp)
+                            .align(Alignment.CenterEnd)
+                            .clickable(enabled = false) {}
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp),
+                            color = Color(0xF0181A20),
+                            contentColor = Color.White
                         ) {
-                            RadioButton(
-                                selected = (state.speed == sp),
-                                onClick = {
-                                    onSetSpeed(sp)
-                                    showSpeedDialog = false
-                                }
+                            MenuContent(
+                                menuType = activeMenu!!,
+                                state = state,
+                                onClose = { activeMenu = null },
+                                onSetSpeed = onSetSpeed,
+                                onSelectSubtitle = onSelectSubtitle,
+                                onSelectAudio = onSelectAudio,
+                                onSubDelayAdjust = onSubDelayAdjust,
+                                onAudioDelayAdjust = onAudioDelayAdjust,
+                                onHwDecChange = onHwDecChange
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("${sp}x")
+                        }
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .clickable(enabled = false) {}
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                            color = Color(0xF0181A20),
+                            contentColor = Color.White
+                        ) {
+                            MenuContent(
+                                menuType = activeMenu!!,
+                                state = state,
+                                onClose = { activeMenu = null },
+                                onSetSpeed = onSetSpeed,
+                                onSelectSubtitle = onSelectSubtitle,
+                                onSelectAudio = onSelectAudio,
+                                onSubDelayAdjust = onSubDelayAdjust,
+                                onAudioDelayAdjust = onAudioDelayAdjust,
+                                onHwDecChange = onHwDecChange
+                            )
                         }
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showSpeedDialog = false }) {
-                    Text("Close")
+            }
+        }
+    }
+}
+
+@Composable
+fun VerticalGesturePill(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String,
+    progress: Float,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xCC111318),
+        contentColor = Color.White,
+        modifier = modifier
+            .width(44.dp)
+            .height(180.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(vertical = 12.dp, horizontal = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+                tint = Color.White
+            )
+
+            Box(
+                modifier = Modifier
+                    .width(4.dp)
+                    .height(90.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color(0x44FFFFFF)),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(progress.coerceIn(0f, 1f))
+                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp))
+                )
+            }
+
+            Text(
+                text = text,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+    }
+}
+
+@Composable
+fun MenuContent(
+    menuType: String,
+    state: PlaybackState,
+    onClose: () -> Unit,
+    onSetSpeed: (Float) -> Unit,
+    onSelectSubtitle: (Int) -> Unit,
+    onSelectAudio: (Int) -> Unit,
+    onSubDelayAdjust: (Double) -> Unit,
+    onAudioDelayAdjust: (Double) -> Unit,
+    onHwDecChange: (HwDecMode) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val title = when (menuType) {
+                "speed" -> "Playback Speed"
+                "tracks" -> "Audio & Subtitles"
+                "info" -> "Decoder & Info"
+                else -> ""
+            }
+            Text(
+                text = title,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            IconButton(onClick = onClose) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        when (menuType) {
+            "speed" -> {
+                val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+                speeds.forEach { sp ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSetSpeed(sp)
+                                onClose()
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${sp}x",
+                            fontSize = 15.sp,
+                            color = if (state.speed == sp) MaterialTheme.colorScheme.primary else Color.White,
+                            fontWeight = if (state.speed == sp) FontWeight.Bold else FontWeight.Normal
+                        )
+                        if (state.speed == sp) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 }
             }
-        )
-    }
+            "tracks" -> {
+                var tabIndex by remember { mutableIntStateOf(0) }
+                TabRow(
+                    selectedTabIndex = tabIndex,
+                    containerColor = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Tab(
+                        selected = tabIndex == 0,
+                        onClick = { tabIndex = 0 },
+                        text = { Text("Audio", color = Color.White) }
+                    )
+                    Tab(
+                        selected = tabIndex == 1,
+                        onClick = { tabIndex = 1 },
+                        text = { Text("Subtitles", color = Color.White) }
+                    )
+                }
 
-    if (showInfoDialog) {
-        AlertDialog(
-            onDismissRequest = { showInfoDialog = false },
-            title = { Text("Media Information") },
-            text = {
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (tabIndex == 0) {
+                    val audioTracks = state.tracks.filter { it.type == TrackType.AUDIO }
+                    LazyColumn(modifier = Modifier.height(200.dp)) {
+                        items(audioTracks) { track ->
+                            val isSelected = track.isSelected || (track.id == state.selectedAudioTrackId)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onSelectAudio(track.id)
+                                    }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = track.title,
+                                    fontSize = 14.sp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.White,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    val subTracks = state.tracks.filter { it.type == TrackType.SUBTITLE }
+                    LazyColumn(modifier = Modifier.height(200.dp)) {
+                        item {
+                            val isOff = subTracks.none { it.isSelected } && state.selectedSubtitleTrackId == -1
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectSubtitle(-1) }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Off",
+                                    fontSize = 14.sp,
+                                    color = if (isOff) MaterialTheme.colorScheme.primary else Color.White
+                                )
+                                if (isOff) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                        items(subTracks) { track ->
+                            val isSelected = track.isSelected || (track.id == state.selectedSubtitleTrackId)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectSubtitle(track.id) }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = track.title,
+                                    fontSize = 14.sp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.White
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "info" -> {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Title: ${state.videoInfo.title.ifEmpty { title }}")
-                    Text("Resolution: ${state.videoInfo.width} x ${state.videoInfo.height}")
-                    Text("Video Codec: ${state.videoInfo.videoCodec.ifEmpty { "N/A" }}")
-                    Text("Audio Codec: ${state.videoInfo.audioCodec.ifEmpty { "N/A" }}")
-                    Text("Frame Rate: ${String.format(Locale.US, "%.2f", state.videoInfo.fps)} fps")
-                    Text("Decoder: ${state.videoInfo.hwdecActive.ifEmpty { state.hwDecMode.label }}")
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Hardware Decoder Selection:", fontWeight = FontWeight.Bold)
+                    Text("Decoder Mode:", fontWeight = FontWeight.Bold, color = Color.White)
                     HwDecMode.values().forEach { mode ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onHwDecChange(mode) }
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(
                                 selected = (state.hwDecMode == mode),
                                 onClick = { onHwDecChange(mode) }
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(mode.label, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(mode.label, fontSize = 13.sp, color = Color.White)
                         }
                     }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showInfoDialog = false }) {
-                    Text("Done")
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Native Engine: ${FFmpegBridge.getConfigurationInfo()}",
+                        fontSize = 12.sp,
+                        color = Color.LightGray
+                    )
                 }
             }
-        )
-    }
-
-    if (showTrackDialog) {
-        var selectedTab by remember { mutableIntStateOf(0) }
-        AlertDialog(
-            onDismissRequest = { showTrackDialog = false },
-            title = { Text("Tracks & Synchronization") },
-            text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    TabRow(selectedTabIndex = selectedTab) {
-                        Tab(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            text = { Text("Subtitles") }
-                        )
-                        Tab(
-                            selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
-                            text = { Text("Audio") }
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (selectedTab == 0) {
-                        val subTracks = state.tracks.filter { it.type == TrackType.SUBTITLE }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Subtitle Delay: ${String.format(Locale.US, "%.1fs", state.subDelaySec)}")
-                            Row {
-                                TextButton(onClick = { onSubDelayAdjust(-0.1) }) { Text("-0.1s") }
-                                TextButton(onClick = { onSubDelayAdjust(0.1) }) { Text("+0.1s") }
-                            }
-                        }
-
-                        LazyColumn(modifier = Modifier.height(180.dp)) {
-                            item {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSelectSubtitle(0) }
-                                        .padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
-                                        selected = subTracks.none { it.isSelected },
-                                        onClick = { onSelectSubtitle(0) }
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Off")
-                                }
-                            }
-                            items(subTracks) { track ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSelectSubtitle(track.id) }
-                                        .padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
-                                        selected = track.isSelected,
-                                        onClick = { onSelectSubtitle(track.id) }
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${track.id}: ${track.title.ifEmpty { track.lang.ifEmpty { "Track ${track.id}" } }} [${track.codec}]",
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        val audioTracks = state.tracks.filter { it.type == TrackType.AUDIO }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Audio Delay: ${String.format(Locale.US, "%.1fs", state.audioDelaySec)}")
-                            Row {
-                                TextButton(onClick = { onAudioDelayAdjust(-0.1) }) { Text("-0.1s") }
-                                TextButton(onClick = { onAudioDelayAdjust(0.1) }) { Text("+0.1s") }
-                            }
-                        }
-
-                        LazyColumn(modifier = Modifier.height(180.dp)) {
-                            items(audioTracks) { track ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSelectAudio(track.id) }
-                                        .padding(vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    RadioButton(
-                                        selected = track.isSelected,
-                                        onClick = { onSelectAudio(track.id) }
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${track.id}: ${track.title.ifEmpty { track.lang.ifEmpty { "Audio Track ${track.id}" } }} [${track.codec}]",
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showTrackDialog = false }) {
-                    Text("Close")
-                }
-            }
-        )
+        }
     }
 }
 

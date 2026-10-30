@@ -2,7 +2,7 @@ package arc.snora
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -31,13 +31,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.core.content.ContextCompat
-import arc.snora.data.MediaRecord
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import arc.snora.data.MediaRepository
 import arc.snora.home.HomeScreen
-import arc.snora.library.FavoritesScreen
-import arc.snora.library.FoldersScreen
-import arc.snora.library.HistoryScreen
 import arc.snora.library.VideosScreen
 import arc.snora.models.FolderGroup
 import arc.snora.models.VideoItem
@@ -58,7 +56,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
         repository = MediaRepository(this)
         player = SnoraPlayer(this)
@@ -67,6 +65,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             SnoraTheme {
                 MainContent(
+                    activity = this,
                     player = player,
                     controller = playerController,
                     repository = repository,
@@ -89,13 +88,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainContent(
+    activity: ComponentActivity,
     player: SnoraPlayer,
     controller: PlayerController,
     repository: MediaRepository,
     initialIntent: Intent?
 ) {
     val scope = rememberCoroutineScope()
-    var currentDestination by remember { mutableStateOf(AppDestination.VIDEOS) }
+    var currentDestination by remember { mutableStateOf(AppDestination.HOME) }
     var activeVideo by remember { mutableStateOf<VideoItem?>(null) }
     var activeTitle by remember { mutableStateOf("") }
 
@@ -103,11 +103,23 @@ fun MainContent(
     var folders by remember { mutableStateOf<List<FolderGroup>>(emptyList()) }
     var isLoadingVideos by remember { mutableStateOf(false) }
 
-    val historyRecords by repository.historyFlow.collectAsState(initial = emptyList())
-    val favoriteRecords by repository.favoritesFlow.collectAsState(initial = emptyList())
-    val favoriteUris = remember(favoriteRecords) { favoriteRecords.map { it.uriString }.toSet() }
-
+    val playbackState by player.playbackState.collectAsState()
     var currentHwDec by remember { mutableStateOf(HwDecMode.AUTO) }
+
+    val insetsController = remember(activity) {
+        WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+    }
+
+    fun setFullscreen(fullscreen: Boolean) {
+        if (fullscreen) {
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
 
     fun refreshMedia() {
         scope.launch {
@@ -133,6 +145,7 @@ fun MainContent(
                 folderName = ""
             )
             activeTitle = title
+            setFullscreen(true)
             player.playMedia(uriString, resumePosition)
         }
     }
@@ -153,6 +166,7 @@ fun MainContent(
             }
         }
         player.pause()
+        setFullscreen(false)
         activeVideo = null
     }
 
@@ -160,16 +174,6 @@ fun MainContent(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) {
         refreshMedia()
-    }
-
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let {
-            val uriStr = it.toString()
-            val fileName = it.lastPathSegment?.substringAfterLast('/') ?: "External Media"
-            playItem(uriStr, fileName, "")
-        }
     }
 
     LaunchedEffect(Unit) {
@@ -195,14 +199,20 @@ fun MainContent(
     }
 
     if (activeVideo != null) {
-        BackHandler {
-            closePlayer()
+        BackHandler(enabled = true) {
+            if (!playbackState.isControlsLocked) {
+                closePlayer()
+            }
         }
 
         PlayerView(
             controller = controller,
             title = activeTitle,
-            onBack = { closePlayer() }
+            onBack = {
+                if (!playbackState.isControlsLocked) {
+                    closePlayer()
+                }
+            }
         )
     } else {
         Scaffold(
@@ -233,63 +243,19 @@ fun MainContent(
                     .padding(innerPadding)
             ) {
                 when (currentDestination) {
+                    AppDestination.HOME -> {
+                        HomeScreen(
+                            folders = folders,
+                            onPlayVideo = { item -> playItem(item.uriString, item.title, item.path) },
+                            onOpenUrl = { url -> playItem(url, url.substringAfterLast('/'), "") }
+                        )
+                    }
                     AppDestination.VIDEOS -> {
                         VideosScreen(
                             videos = videos,
-                            favorites = favoriteUris,
                             isLoading = isLoadingVideos,
                             onRefresh = { refreshMedia() },
-                            onPlayVideo = { item -> playItem(item.uriString, item.title, item.path) },
-                            onToggleFavorite = { item ->
-                                scope.launch {
-                                    repository.toggleFavorite(item.uriString, item.title, item.path, item.durationMs)
-                                }
-                            }
-                        )
-                    }
-                    AppDestination.FOLDERS -> {
-                        FoldersScreen(
-                            folders = folders,
-                            favorites = favoriteUris,
-                            onPlayVideo = { item -> playItem(item.uriString, item.title, item.path) },
-                            onToggleFavorite = { item ->
-                                scope.launch {
-                                    repository.toggleFavorite(item.uriString, item.title, item.path, item.durationMs)
-                                }
-                            }
-                        )
-                    }
-                    AppDestination.HOME -> {
-                        val latestHistory = historyRecords.firstOrNull()
-                        HomeScreen(
-                            recentRecord = latestHistory,
-                            recentVideos = videos,
-                            onOpenFilePicker = { filePickerLauncher.launch("video/*") },
-                            onOpenUrl = { url -> playItem(url, url.substringAfterLast('/'), "") },
-                            onPlayRecord = { record -> playItem(record.uriString, record.title, record.path) },
                             onPlayVideo = { item -> playItem(item.uriString, item.title, item.path) }
-                        )
-                    }
-                    AppDestination.HISTORY -> {
-                        HistoryScreen(
-                            history = historyRecords,
-                            onPlayRecord = { record -> playItem(record.uriString, record.title, record.path) },
-                            onDeleteRecord = { record ->
-                                scope.launch {
-                                    repository.savePlaybackPosition(record.uriString, record.title, record.path, 0L, 0L)
-                                }
-                            }
-                        )
-                    }
-                    AppDestination.FAVORITES -> {
-                        FavoritesScreen(
-                            favorites = favoriteRecords,
-                            onPlayRecord = { record -> playItem(record.uriString, record.title, record.path) },
-                            onRemoveFavorite = { record ->
-                                scope.launch {
-                                    repository.toggleFavorite(record.uriString, record.title, record.path, record.durationMs)
-                                }
-                            }
                         )
                     }
                     AppDestination.SETTINGS -> {
