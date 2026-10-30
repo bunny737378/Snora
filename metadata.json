@@ -1,0 +1,6 @@
+{
+  "name": "SNORA",
+  "description": "Advanced Android Video Player with MPV core and high-performance FFmpeg decoding.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

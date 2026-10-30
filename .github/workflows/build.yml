@@ -1,0 +1,87 @@
+name: Build SNORA APK
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build SNORA APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
+
+      - name: Ensure Debug Keystore Exists
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            echo "Generating debug.keystore..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Ensure Native Libraries
+        run: |
+          mkdir -p player/src/main/jniLibs/arm64-v8a player/src/main/jniLibs/armeabi-v7a
+          if [ ! -f "player/src/main/jniLibs/arm64-v8a/libavcodec.so" ]; then
+            echo "Downloading precompiled FFmpeg from NEWWFFMCREATEE..."
+            mkdir -p /tmp/ffmpeg_ci
+            curl -L -s https://github.com/bunny737378/NEWWFFMCREATEE/releases/download/ffmpeg-android-latest/ffmpeg.zip -o /tmp/ffmpeg_ci/ffmpeg.zip
+            unzip -q /tmp/ffmpeg_ci/ffmpeg.zip -d /tmp/ffmpeg_ci_unpacked
+            cp -v /tmp/ffmpeg_ci_unpacked/lib/arm64-v8a/*.so player/src/main/jniLibs/arm64-v8a/
+            cp -v /tmp/ffmpeg_ci_unpacked/lib/armeabi-v7a/*.so player/src/main/jniLibs/armeabi-v7a/
+          fi
+          if [ ! -f "player/src/main/jniLibs/arm64-v8a/libmpv.so" ]; then
+            echo "Downloading MPV core binaries..."
+            mkdir -p /tmp/mpv_ci
+            curl -L -s https://github.com/mpv-android/mpv-android/releases/download/2026-09-17/app-default-universal-release.apk -o /tmp/mpv_ci/mpv.apk
+            unzip -q /tmp/mpv_ci/mpv.apk -d /tmp/mpv_ci_unpacked
+            cp -v /tmp/mpv_ci_unpacked/lib/arm64-v8a/libmpv.so /tmp/mpv_ci_unpacked/lib/arm64-v8a/libplayer.so /tmp/mpv_ci_unpacked/lib/arm64-v8a/libc++_shared.so player/src/main/jniLibs/arm64-v8a/
+            cp -v /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libmpv.so /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libplayer.so /tmp/mpv_ci_unpacked/lib/armeabi-v7a/libc++_shared.so player/src/main/jniLibs/armeabi-v7a/
+          fi
+          ls -lh player/src/main/jniLibs/arm64-v8a/
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Prepare Output APK
+        run: |
+          mkdir -p output
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          cp "$APK_PATH" output/SNORA.apk
+          cp "$APK_PATH" SNORA.apk
+          echo "Output APK size:"
+          ls -lh output/SNORA.apk
+
+      - name: Upload SNORA APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SNORA-apk
+          path: output/SNORA.apk
+          retention-days: 30
