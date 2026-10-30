@@ -41,6 +41,36 @@ static std::atomic<int64_t> g_seekTargetMs(-1);
 static std::atomic<int> g_videoWidth(0);
 static std::atomic<int> g_videoHeight(0);
 
+// Track Info Variables
+static std::atomic<int> g_selectedAudioStreamIndex(-1);
+static std::atomic<int> g_selectedSubtitleStreamIndex(-1);
+static std::atomic<int> g_requestedAudioStreamIndex(-2);
+
+struct NativeTrackInfo {
+    int index;
+    int type;
+    std::string title;
+    std::string lang;
+    std::string codec;
+};
+static std::vector<NativeTrackInfo> g_tracks;
+static pthread_mutex_t g_tracksMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static std::string escapeJson(const std::string& s) {
+    std::ostringstream o;
+    for (char c : s) {
+        if (c == '"') o << "\\\"";
+        else if (c == '\\') o << "\\\\";
+        else if (c == '\b') o << "\\b";
+        else if (c == '\f') o << "\\f";
+        else if (c == '\n') o << "\\n";
+        else if (c == '\r') o << "\\r";
+        else if (c == '\t') o << "\\t";
+        else o << c;
+    }
+    return o.str();
+}
+
 struct MyPacket {
     AVPacket* pkt;
     bool is_flush;
@@ -216,7 +246,6 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
                 uint8_t* outData[1] = { (uint8_t*)outBuffer };
                 int outSamples = swr_convert(swrCtx, outData, 48000, (const uint8_t**)frame->data, frame->nb_samples);
                 if (outSamples > 0 && aaudioStream) {
-                    // Blocking write paces the decoding loop to real-time audio speed
                     AAudioStream_write(aaudioStream, outBuffer, outSamples, 100000000LL); 
                 }
             }
@@ -235,7 +264,6 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
 static void demuxPlaybackWorker(std::string videoUrl) {
     g_videoWidth.store(0);
     g_videoHeight.store(0);
-    
     g_videoQueue.start();
     g_audioQueue.start();
 
@@ -248,11 +276,38 @@ static void demuxPlaybackWorker(std::string videoUrl) {
     avformat_find_stream_info(formatCtx, nullptr);
     g_durationMs = formatCtx->duration != AV_NOPTS_VALUE ? formatCtx->duration / (AV_TIME_BASE / 1000) : 0;
 
+    pthread_mutex_lock(&g_tracksMutex);
+    g_tracks.clear();
     int vIdx = -1, aIdx = -1;
     for (unsigned int i = 0; i < formatCtx->nb_streams; ++i) {
-        if (formatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && vIdx < 0) vIdx = i;
-        if (formatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && aIdx < 0) aIdx = i;
+        AVStream* st = formatCtx->streams[i];
+        AVMediaType type = st->codecpar->codec_type;
+
+        std::string lang = "und", title = "";
+        AVDictionaryEntry* langEntry = av_dict_get(st->metadata, "language", nullptr, 0);
+        if (langEntry && langEntry->value) lang = langEntry->value;
+        AVDictionaryEntry* titleEntry = av_dict_get(st->metadata, "title", nullptr, 0);
+        if (titleEntry && titleEntry->value) title = titleEntry->value;
+        
+        const AVCodec* c = avcodec_find_decoder(st->codecpar->codec_id);
+        std::string codecName = c ? c->name : "unknown";
+
+        if (type == AVMEDIA_TYPE_VIDEO) {
+            if (vIdx < 0) vIdx = i;
+            if (title.empty()) title = "Video Track " + std::to_string(i);
+            g_tracks.push_back({(int)i, 0, title, lang, codecName});
+        } else if (type == AVMEDIA_TYPE_AUDIO) {
+            if (aIdx < 0) aIdx = i;
+            if (title.empty()) title = "Audio Track " + std::to_string(i) + " (" + lang + ")";
+            g_tracks.push_back({(int)i, 1, title, lang, codecName});
+        } else if (type == AVMEDIA_TYPE_SUBTITLE) {
+            if (title.empty()) title = "Subtitle " + std::to_string(i) + " (" + lang + ")";
+            g_tracks.push_back({(int)i, 2, title, lang, codecName});
+        }
     }
+    pthread_mutex_unlock(&g_tracksMutex);
+    
+    g_selectedAudioStreamIndex.store(aIdx);
 
     AVCodecContext* vCtx = nullptr;
     std::thread vThread;
@@ -360,4 +415,33 @@ JNIEXPORT jlong JNICALL Java_arc_snora_player_SnoraNativeEngine_getCurrentPositi
 JNIEXPORT jboolean JNICALL Java_arc_snora_player_SnoraNativeEngine_isPlaying(JNIEnv* env, jobject thiz) { return g_isPlaying.load(); }
 JNIEXPORT jint JNICALL Java_arc_snora_player_SnoraNativeEngine_getVideoWidth(JNIEnv* env, jobject thiz) { return g_videoWidth.load(); }
 JNIEXPORT jint JNICALL Java_arc_snora_player_SnoraNativeEngine_getVideoHeight(JNIEnv* env, jobject thiz) { return g_videoHeight.load(); }
+
+JNIEXPORT jstring JNICALL Java_arc_snora_player_SnoraNativeEngine_getTracksJson(JNIEnv* env, jobject thiz) {
+    pthread_mutex_lock(&g_tracksMutex);
+    std::ostringstream json;
+    json << "[";
+    for (size_t i = 0; i < g_tracks.size(); ++i) {
+        const auto& t = g_tracks[i];
+        if (i > 0) json << ",";
+        json << "{\"id\":" << t.index
+             << ",\"type\":" << t.type
+             << ",\"title\":\"" << escapeJson(t.title) << "\""
+             << ",\"lang\":\"" << escapeJson(t.lang) << "\""
+             << ",\"codec\":\"" << escapeJson(t.codec) << "\""
+             << ",\"isSelected\":" << ((t.type == 1 && t.index == g_selectedAudioStreamIndex.load()) || 
+                                       (t.type == 2 && t.index == g_selectedSubtitleStreamIndex.load()) ? "true" : "false")
+             << "}";
+    }
+    json << "]";
+    pthread_mutex_unlock(&g_tracksMutex);
+    return env->NewStringUTF(json.str().c_str());
+}
+
+JNIEXPORT void JNICALL Java_arc_snora_player_SnoraNativeEngine_setAudioTrack(JNIEnv* env, jobject thiz, jint streamIndex) {
+    g_requestedAudioStreamIndex.store((int)streamIndex);
+}
+
+JNIEXPORT void JNICALL Java_arc_snora_player_SnoraNativeEngine_setSubtitleTrack(JNIEnv* env, jobject thiz, jint streamIndex) {
+    g_selectedSubtitleStreamIndex.store((int)streamIndex);
+}
 }
