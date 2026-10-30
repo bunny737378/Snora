@@ -4,8 +4,8 @@
 #include <android/log.h>
 #include <aaudio/AAudio.h>
 #include <EGL/egl.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
+#include <GLES3/gl3.h>
+#include <GLES3/gl3ext.h>
 #include <pthread.h>
 #include <string>
 #include <atomic>
@@ -23,15 +23,18 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
-#include <libswresample/swresample.h>
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/time.h>
 #include <libavutil/opt.h>
-#include <libavutil/hwcontext.h>
+#include <libavutil/channel_layout.h>
 }
+
+#ifndef GL_UNPACK_ROW_LENGTH
+#define GL_UNPACK_ROW_LENGTH 0x0CF2
+#endif
 
 #define LOG_TAG "SnoraNativePlayer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -150,7 +153,7 @@ void main() {
     float u = texture2D(uTextureU, vTexCoord).r - 0.5;
     float v = texture2D(uTextureV, vTexCoord).r - 0.5;
     float r = y + 1.402 * v;
-    float g = y - 0.34414 * u - 0.71414 * v;
+    float g = y - 0.344136 * u - 0.714136 * v;
     float b = y + 1.772 * u;
     gl_FragColor = vec4(r, g, b, 1.0);
 }
@@ -261,6 +264,9 @@ static void calculateMvpMatrix(int videoWidth, int videoHeight, int winWidth, in
 
 static void videoDecoderThread(AVCodecContext* codecCtx, int streamIdx, double timeBase) {
     AVFrame* frame = av_frame_alloc();
+    AVFrame* convertedFrame = av_frame_alloc();
+    SwsContext* swsContext = nullptr;
+    int swsWidth = 0, swsHeight = 0;
     MyPacket mp;
 
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -405,6 +411,28 @@ static void videoDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
                 g_videoWidth.store(width);
                 g_videoHeight.store(height);
 
+                AVFrame* yuvFrame = frame;
+                if (frame->format != AV_PIX_FMT_YUV420P) {
+                    if (!swsContext || swsWidth != width || swsHeight != height) {
+                        if (swsContext) sws_freeContext(swsContext);
+                        swsContext = sws_getContext(width, height, (AVPixelFormat)frame->format,
+                                                    width, height, AV_PIX_FMT_YUV420P,
+                                                    SWS_BILINEAR, nullptr, nullptr, nullptr);
+                        swsWidth = width;
+                        swsHeight = height;
+                    }
+                    if (swsContext) {
+                        convertedFrame->width = width;
+                        convertedFrame->height = height;
+                        convertedFrame->format = AV_PIX_FMT_YUV420P;
+                        if (!convertedFrame->data[0]) {
+                            av_frame_get_buffer(convertedFrame, 32);
+                        }
+                        sws_scale(swsContext, frame->data, frame->linesize, 0, height, convertedFrame->data, convertedFrame->linesize);
+                        yuvFrame = convertedFrame;
+                    }
+                }
+
                 if (frame->pts != AV_NOPTS_VALUE) {
                     int64_t ptsMs = static_cast<int64_t>(frame->pts * timeBase * 1000);
                     g_currentPositionMs.store(ptsMs);
@@ -432,21 +460,23 @@ static void videoDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
 
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, texY);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, frame->linesize[0], height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, frame->data[0]);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, yuvFrame->linesize[0]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width, height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[0]);
                 glUniform1i(uTexYLoc, 0);
 
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, texU);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, frame->linesize[1], height / 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, frame->data[1]);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, yuvFrame->linesize[1]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width / 2, height / 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[1]);
                 glUniform1i(uTexULoc, 1);
 
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(GL_TEXTURE_2D, texV);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, frame->linesize[2], height / 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, frame->data[2]);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, yuvFrame->linesize[2]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width / 2, height / 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, yuvFrame->data[2]);
                 glUniform1i(uTexVLoc, 2);
+
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
                 glVertexAttribPointer(aPosLocation, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vertices);
                 glEnableVertexAttribArray(aPosLocation);
@@ -488,6 +518,8 @@ static void videoDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         eglTerminate(display);
     }
 
+    if (swsContext) sws_freeContext(swsContext);
+    av_frame_free(&convertedFrame);
     av_frame_free(&frame);
 }
 
@@ -535,9 +567,7 @@ static void subtitleDecoderThread(AVCodecContext* codecCtx, int streamIdx) {
 static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double timeBase) {
     AVFrame* frame = av_frame_alloc();
     AVFrame* filterFrame = av_frame_alloc();
-    SwrContext* swrCtx = nullptr;
     AAudioStream* aaudioStream = nullptr;
-    int16_t outBuffer[192000];
 
     AVFilterGraph* filterGraph = nullptr;
     AVFilterContext* srcCtx = nullptr;
@@ -555,11 +585,19 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         const AVFilter* abuffer = avfilter_get_by_name("abuffer");
         const AVFilter* abuffersink = avfilter_get_by_name("abuffersink");
         const AVFilter* atempo = avfilter_get_by_name("atempo");
+        const AVFilter* aformat = avfilter_get_by_name("aformat");
 
         std::ostringstream args;
         args << "sample_rate=" << codecCtx->sample_rate
              << ":sample_fmt=" << av_get_sample_fmt_name(codecCtx->sample_fmt)
-             << ":channel_layout=0x" << std::hex << codecCtx->ch_layout.u.mask;
+             << ":time_base=" << codecCtx->time_base.num << "/" << codecCtx->time_base.den;
+        if (codecCtx->ch_layout.order != AV_CHANNEL_ORDER_UNSPEC) {
+            char buf[64];
+            av_channel_layout_describe(&codecCtx->ch_layout, buf, sizeof(buf));
+            args << ":channel_layout=" << buf;
+        } else {
+            args << ":channel_layout=stereo";
+        }
 
         avfilter_graph_create_filter(&srcCtx, abuffer, "in", args.str().c_str(), nullptr, filterGraph);
         avfilter_graph_create_filter(&sinkCtx, abuffersink, "out", nullptr, nullptr, filterGraph);
@@ -569,19 +607,18 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         atempoArgs << "tempo=" << speed;
         avfilter_graph_create_filter(&atempoCtx, atempo, "atempo", atempoArgs.str().c_str(), nullptr, filterGraph);
 
+        AVFilterContext* aformatCtx = nullptr;
+        avfilter_graph_create_filter(&aformatCtx, aformat, "aformat", "sample_fmts=s16:sample_rates=48000:channel_layouts=stereo", nullptr, filterGraph);
+
         avfilter_link(srcCtx, 0, atempoCtx, 0);
-        avfilter_link(atempoCtx, 0, sinkCtx, 0);
+        avfilter_link(atempoCtx, 0, aformatCtx, 0);
+        avfilter_link(aformatCtx, 0, sinkCtx, 0);
 
         avfilter_graph_config(filterGraph, nullptr);
         currentSpeed = speed;
     };
 
     setupAudioFilter(g_playbackSpeed.load());
-
-    AVChannelLayout outLayout = AV_CHANNEL_LAYOUT_STEREO;
-    swr_alloc_set_opts2(&swrCtx, &outLayout, AV_SAMPLE_FMT_S16, 48000,
-                        &codecCtx->ch_layout, codecCtx->sample_fmt, codecCtx->sample_rate, 0, nullptr);
-    swr_init(swrCtx);
 
     AAudioStreamBuilder* builder = nullptr;
     AAudio_createStreamBuilder(&builder);
@@ -604,8 +641,10 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
 
         if (mp.is_flush) {
             avcodec_flush_buffers(codecCtx);
-            AAudioStream_requestFlush(aaudioStream);
-            AAudioStream_requestStart(aaudioStream);
+            if (aaudioStream) {
+                AAudioStream_requestFlush(aaudioStream);
+                AAudioStream_requestStart(aaudioStream);
+            }
             continue;
         }
 
@@ -619,10 +658,8 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
 
                 if (av_buffersrc_add_frame_flags(srcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0) {
                     while (av_buffersink_get_frame(sinkCtx, filterFrame) >= 0) {
-                        uint8_t* outData[1] = { (uint8_t*)outBuffer };
-                        int outSamples = swr_convert(swrCtx, outData, 48000, (const uint8_t**)filterFrame->data, filterFrame->nb_samples);
-                        if (outSamples > 0 && aaudioStream) {
-                            AAudioStream_write(aaudioStream, outBuffer, outSamples, 100000000LL);
+                        if (filterFrame->nb_samples > 0 && aaudioStream) {
+                            AAudioStream_write(aaudioStream, filterFrame->data[0], filterFrame->nb_samples, 100000000LL);
                         }
                         av_frame_unref(filterFrame);
                     }
@@ -637,7 +674,6 @@ static void audioDecoderThread(AVCodecContext* codecCtx, int streamIdx, double t
         AAudioStream_close(aaudioStream);
     }
     if (filterGraph) avfilter_graph_free(&filterGraph);
-    if (swrCtx) swr_free(&swrCtx);
     av_frame_free(&filterFrame);
     av_frame_free(&frame);
 }
