@@ -118,7 +118,7 @@ class SnoraPlayer(private val context: Context) {
         val isSwMode = _playbackState.value.hwDecMode == HwDecMode.SW
 
         if (SnoraNativeEngine.isLoaded && (isMatroska || isSwMode)) {
-            playWithNativeEngine(pathOrUri)
+            playWithNativeEngine(pathOrUri, startPositionMs)
             return
         }
 
@@ -144,7 +144,7 @@ class SnoraPlayer(private val context: Context) {
             player.prepareAsync()
         } catch (t: Throwable) {
             if (SnoraNativeEngine.isLoaded) {
-                playWithNativeEngine(pathOrUri)
+                playWithNativeEngine(pathOrUri, startPositionMs)
             } else {
                 _playbackState.value = _playbackState.value.copy(
                     status = PlaybackStatus.ERROR,
@@ -154,18 +154,30 @@ class SnoraPlayer(private val context: Context) {
         }
     }
 
-    private fun playWithNativeEngine(pathOrUri: String) {
+    private fun playWithNativeEngine(pathOrUri: String, startPositionMs: Long = 0L) {
         isNativePlaying = true
         mediaPlayer?.reset()
         currentSurface?.let { SnoraNativeEngine.setSurface(it) }
 
         _playbackState.value = _playbackState.value.copy(
             status = PlaybackStatus.PLAYING,
+            positionMs = startPositionMs,
             videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "Native FFmpeg C++ (NEWWFFMCREATEE)")
         )
 
         SnoraNativeEngine.playVideo(pathOrUri)
+        if (startPositionMs > 0L) {
+            SnoraNativeEngine.seekTo(startPositionMs)
+        }
         startNativeProgressTracker()
+
+        playerScope.launch {
+            delay(500)
+            val nativeTracks = SnoraNativeEngine.getAvailableTracks()
+            if (nativeTracks.isNotEmpty()) {
+                _playbackState.value = _playbackState.value.copy(tracks = nativeTracks)
+            }
+        }
     }
 
     private fun startNativeProgressTracker() {
@@ -203,7 +215,7 @@ class SnoraPlayer(private val context: Context) {
 
     fun resume() {
         if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            playWithNativeEngine(currentPathOrUri)
+            playWithNativeEngine(currentPathOrUri, _playbackState.value.positionMs)
             return
         }
         try {
@@ -237,13 +249,14 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun seekTo(positionMs: Long) {
+        val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
         if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            playWithNativeEngine(currentPathOrUri)
+            SnoraNativeEngine.seekTo(clamped)
+            _playbackState.value = _playbackState.value.copy(positionMs = clamped)
             return
         }
         try {
             val player = mediaPlayer ?: return
-            val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 player.seekTo(clamped, MediaPlayer.SEEK_CLOSEST)
             } else {
@@ -279,6 +292,25 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun selectTrack(type: TrackType, trackIndex: Int) {
+        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
+            if (type == TrackType.AUDIO) {
+                SnoraNativeEngine.setAudioTrack(trackIndex)
+                _playbackState.value = _playbackState.value.copy(selectedAudioTrackId = trackIndex)
+            } else if (type == TrackType.SUBTITLE) {
+                SnoraNativeEngine.setSubtitleTrack(trackIndex)
+                _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = trackIndex)
+            }
+            val updatedTracks = _playbackState.value.tracks.map { track ->
+                if (track.type == type) {
+                    track.copy(isSelected = (track.id == trackIndex))
+                } else {
+                    track
+                }
+            }
+            _playbackState.value = _playbackState.value.copy(tracks = updatedTracks)
+            return
+        }
+
         try {
             val player = mediaPlayer ?: return
             if (trackIndex < 0) {

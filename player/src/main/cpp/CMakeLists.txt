@@ -39,6 +39,7 @@ target_link_libraries(snora_player
     avfilter
     avdevice
     android
+    aaudio
     log
     z
 )
