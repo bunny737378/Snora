@@ -15,17 +15,18 @@ enum class TrackType {
     SUBTITLE
 }
 
-enum class AspectRatioMode(val label: String) {
-    FIT("Fit to Screen"),
-    CROP("Crop & Fill"),
-    STRETCH("Stretch"),
-    RATIO_16_9("16:9"),
-    RATIO_4_3("4:3")
+enum class AspectRatioMode(val label: String, val description: String) {
+    FIT("Fit", "Video ko bina crop kiye poora dikhata hai"),
+    CROP("Crop", "Video ke extra parts ko kaatkar required size mein dikhata hai"),
+    FILL("Fill", "Video ko poori screen par dikhata hai"),
+    RATIO_16_9("16:9", "16:9 widescreen aspect ratio"),
+    RATIO_1_1("1:1", "1:1 square aspect ratio"),
+    RATIO_4_3("4:3", "4:3 standard aspect ratio")
 }
 
 enum class HwDecMode(val value: String, val label: String) {
-    AUTO("auto", "Auto (Hardware + SW Fallback)"),
-    SW("sw", "Software (SW Decoders Only)")
+    AUTO("auto", "HW"),
+    SW("no", "SW")
 }
 
 data class TrackItem(
@@ -44,7 +45,7 @@ data class VideoInfo(
     val videoCodec: String = "",
     val audioCodec: String = "",
     val fps: Double = 0.0,
-    val hwdecActive: String = "Auto (MediaCodec)"
+    val hwdecActive: String = "HW"
 )
 
 data class PlaybackState(
@@ -53,7 +54,7 @@ data class PlaybackState(
     val durationMs: Long = 0L,
     val speed: Float = 1.0f,
     val isMuted: Boolean = false,
-    val volume: Int = 100,
+    val volumeLevel: Int = 15,
     val audioDelaySec: Double = 0.0,
     val subDelaySec: Double = 0.0,
     val subScale: Float = 1.0f,
@@ -61,6 +62,8 @@ data class PlaybackState(
     val isScrubbing: Boolean = false,
     val aspectRatioMode: AspectRatioMode = AspectRatioMode.FIT,
     val hwDecMode: HwDecMode = HwDecMode.AUTO,
+    val hwDecFailed: Boolean = false,
+    val hwDecCurrent: String = "mediacodec",
     val tracks: List<TrackItem> = emptyList(),
     val chapters: List<ChapterItem> = emptyList(),
     val currentSubtitleText: String = "",

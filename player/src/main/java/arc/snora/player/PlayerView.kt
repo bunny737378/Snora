@@ -3,8 +3,11 @@ package arc.snora.player
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.net.Uri
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -38,6 +41,22 @@ fun PlayerView(
     val isHudVisible by controller.isHudVisible.collectAsState()
     val gestureState by controller.gestureState.collectAsState()
 
+    val subtitlePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            controller.player.subtitleManager.loadExternalSubtitle(it.toString())
+        }
+    }
+
+    val audioPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            controller.player.audioManager.loadExternalAudio(it.toString())
+        }
+    }
+
     DisposableEffect(controller.player) {
         onDispose {
             controller.player.pause()
@@ -53,7 +72,7 @@ fun PlayerView(
             .pointerInput(playbackState.isControlsLocked) {
                 detectTapGestures(
                     onTap = {
-                        controller.toggleHudVisibility()
+                        controller.onScreenTap()
                     },
                     onDoubleTap = { offset ->
                         if (!playbackState.isControlsLocked) {
@@ -67,10 +86,10 @@ fun PlayerView(
                 if (!playbackState.isControlsLocked) {
                     detectDragGestures(
                         onDrag = { change, dragAmount ->
-                            if (abs(dragAmount.y) > abs(dragAmount.x) * 1.3f) {
+                            if (abs(dragAmount.y) > abs(dragAmount.x) * 1.2f) {
                                 change.consume()
                                 val isLeftHalf = change.position.x < size.width / 2
-                                val deltaPercent = -dragAmount.y / (size.height * 0.8f)
+                                val deltaPercent = -dragAmount.y / (size.height * 0.75f)
 
                                 if (isLeftHalf) {
                                     controller.adjustBrightnessGesture(activity, deltaPercent)
@@ -101,7 +120,7 @@ fun PlayerView(
                                 width: Int,
                                 height: Int
                             ) {
-                                controller.player.attachSurface(holder.surface)
+                                controller.player.onSurfaceChanged(width, height)
                             }
 
                             override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -124,15 +143,17 @@ fun PlayerView(
             onSeek = { targetMs -> controller.player.seekTo(targetMs) },
             onSeekRelative = { deltaSec -> controller.player.seekRelative(deltaSec) },
             onSetSpeed = { speed -> controller.player.setSpeed(speed) },
-            onCycleAspectRatio = { controller.player.videoRenderer.cycleAspectRatioMode() },
+            onSelectAspectRatio = { mode -> controller.player.videoRenderer.setAspectRatioMode(mode) },
             onToggleLock = { controller.toggleLock() },
             onToggleOrientation = { controller.toggleOrientation(activity) },
             onSelectSubtitle = { trackId -> controller.player.subtitleManager.selectSubtitleTrack(trackId) },
             onSelectAudio = { trackId -> controller.player.audioManager.selectAudioTrack(trackId) },
             onSubDelayAdjust = { delta -> controller.player.subtitleManager.adjustSubtitleDelay(delta) },
             onAudioDelayAdjust = { delta -> controller.player.audioManager.adjustAudioDelay(delta) },
-            onHwDecChange = { mode -> controller.player.videoRenderer.setHwDecMode(mode) },
-            onScrubbingChange = { isScrubbing -> controller.setScrubbing(isScrubbing) }
+            onToggleHwDec = { controller.player.videoRenderer.toggleHwDec() },
+            onScrubbingChange = { isScrubbing -> controller.setScrubbing(isScrubbing) },
+            onPickSubtitle = { subtitlePicker.launch(arrayOf("*/*")) },
+            onPickAudio = { audioPicker.launch(arrayOf("audio/*", "*/*")) }
         )
     }
 }

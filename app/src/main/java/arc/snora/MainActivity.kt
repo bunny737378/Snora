@@ -132,7 +132,6 @@ fun MainContent(
 
     fun playItem(uriString: String, title: String, path: String) {
         scope.launch {
-            val resumePosition = repository.getResumePosition(uriString)
             activeVideo = VideoItem(
                 id = uriString.hashCode().toLong(),
                 title = title,
@@ -147,25 +146,11 @@ fun MainContent(
             activeTitle = title
             setFullscreen(true)
             val source = if (path.isNotBlank()) path else uriString
-            player.playMedia(source, resumePosition)
+            player.playMedia(source, 0L)
         }
     }
 
     fun closePlayer() {
-        val currentVideo = activeVideo
-        if (currentVideo != null) {
-            val position = player.playbackState.value.positionMs
-            val duration = player.playbackState.value.durationMs
-            scope.launch {
-                repository.savePlaybackPosition(
-                    uriString = currentVideo.uriString,
-                    title = currentVideo.title,
-                    path = currentVideo.path,
-                    positionMs = position,
-                    durationMs = duration
-                )
-            }
-        }
         player.pause()
         setFullscreen(false)
         activeVideo = null

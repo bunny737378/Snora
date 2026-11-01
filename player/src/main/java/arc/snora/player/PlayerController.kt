@@ -3,7 +3,6 @@ package arc.snora.player
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
-import android.media.AudioManager as AndroidAudioManager
 import android.provider.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +17,9 @@ data class GestureOverlayState(
     val isVisible: Boolean = false,
     val iconType: GestureIconType = GestureIconType.NONE,
     val text: String = "",
-    val progress: Float = 0f
+    val progress: Float = 0f,
+    val volumeLevel: Int = 15,
+    val isBoost: Boolean = false
 )
 
 enum class GestureIconType {
@@ -34,7 +35,7 @@ class PlayerController(
 ) {
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
 
-    private val _isHudVisible = MutableStateFlow(true)
+    private val _isHudVisible = MutableStateFlow(false)
     val isHudVisible: StateFlow<Boolean> = _isHudVisible.asStateFlow()
 
     private val _gestureState = MutableStateFlow(GestureOverlayState())
@@ -45,9 +46,6 @@ class PlayerController(
     private var isScrubbing: Boolean = false
 
     private var accumulatedVolumeDelta: Float = 0f
-
-    private val systemAudioManager =
-        context.getSystemService(Context.AUDIO_SERVICE) as? AndroidAudioManager
 
     init {
         scheduleAutoHide()
@@ -63,11 +61,18 @@ class PlayerController(
         }
     }
 
-    fun toggleHudVisibility() {
+    fun onScreenTap() {
+        if (_gestureState.value.isVisible) {
+            dismissGestureOverlayImmediately()
+            showHud()
+            return
+        }
+
         if (player.playbackState.value.isControlsLocked) {
             _isHudVisible.value = !_isHudVisible.value
             return
         }
+
         val next = !_isHudVisible.value
         _isHudVisible.value = next
         if (next) {
@@ -106,33 +111,44 @@ class PlayerController(
         val delta = if (isForward) 10.0 else -10.0
         player.seekRelative(delta)
         showGestureOverlay(
-            GestureIconType.SEEK,
-            if (isForward) "+10s" else "-10s",
-            0.5f
+            type = GestureIconType.SEEK,
+            text = if (isForward) "+10s" else "-10s",
+            progress = 0.5f,
+            volLevel = 0,
+            boost = false
         )
     }
 
     fun adjustVolumeGesture(deltaPercent: Float) {
-        systemAudioManager?.let { am ->
-            val max = am.getStreamMaxVolume(AndroidAudioManager.STREAM_MUSIC)
-            val current = am.getStreamVolume(AndroidAudioManager.STREAM_MUSIC)
-            accumulatedVolumeDelta += deltaPercent * max * 0.8f
-            val steps = accumulatedVolumeDelta.toInt()
-            if (steps != 0) {
-                val target = (current + steps).coerceIn(0, max)
-                am.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, target, 0)
-                accumulatedVolumeDelta -= steps
-                val pct = target.toFloat() / max.toFloat().coerceAtLeast(1f)
-                showGestureOverlay(
-                    GestureIconType.VOLUME,
-                    "${(pct * 100).toInt()}%",
-                    pct
-                )
-            }
+        dismissBrightnessImmediately()
+        hideHud()
+
+        accumulatedVolumeDelta += deltaPercent * 30f * 0.7f
+        val steps = accumulatedVolumeDelta.toInt()
+        if (steps != 0) {
+            val current = player.playbackState.value.volumeLevel
+            val target = (current + steps).coerceIn(0, 30)
+            player.setVolume30(target)
+            accumulatedVolumeDelta -= steps
+
+            val isBoost = target > 15
+            val label = if (isBoost) "$target (Boost)" else "$target / 15"
+            val progress = target.toFloat() / 30f
+
+            showGestureOverlay(
+                type = GestureIconType.VOLUME,
+                text = label,
+                progress = progress,
+                volLevel = target,
+                boost = isBoost
+            )
         }
     }
 
     fun adjustBrightnessGesture(activity: Activity?, deltaPercent: Float) {
+        dismissVolumeImmediately()
+        hideHud()
+
         activity?.let { act ->
             val lp = act.window.attributes
             var current = lp.screenBrightness
@@ -149,24 +165,55 @@ class PlayerController(
             val target = (current + deltaPercent).coerceIn(0.01f, 1.0f)
             lp.screenBrightness = target
             act.window.attributes = lp
+            val percentInt = (target * 100).toInt().coerceIn(1, 100)
+
             showGestureOverlay(
-                GestureIconType.BRIGHTNESS,
-                "${(target * 100).toInt()}%",
-                target
+                type = GestureIconType.BRIGHTNESS,
+                text = "$percentInt%",
+                progress = target,
+                volLevel = 0,
+                boost = false
             )
         }
     }
 
-    private fun showGestureOverlay(type: GestureIconType, text: String, progress: Float) {
+    private fun dismissBrightnessImmediately() {
+        if (_gestureState.value.iconType == GestureIconType.BRIGHTNESS) {
+            gestureHideJob?.cancel()
+            _gestureState.value = GestureOverlayState(isVisible = false)
+        }
+    }
+
+    private fun dismissVolumeImmediately() {
+        if (_gestureState.value.iconType == GestureIconType.VOLUME) {
+            gestureHideJob?.cancel()
+            _gestureState.value = GestureOverlayState(isVisible = false)
+        }
+    }
+
+    fun dismissGestureOverlayImmediately() {
+        gestureHideJob?.cancel()
+        _gestureState.value = GestureOverlayState(isVisible = false)
+    }
+
+    private fun showGestureOverlay(
+        type: GestureIconType,
+        text: String,
+        progress: Float,
+        volLevel: Int,
+        boost: Boolean
+    ) {
         _gestureState.value = GestureOverlayState(
             isVisible = true,
             iconType = type,
             text = text,
-            progress = progress
+            progress = progress,
+            volumeLevel = volLevel,
+            isBoost = boost
         )
         gestureHideJob?.cancel()
         gestureHideJob = scope.launch {
-            delay(1200)
+            delay(1100)
             _gestureState.value = _gestureState.value.copy(isVisible = false)
         }
     }
@@ -174,10 +221,12 @@ class PlayerController(
     fun toggleOrientation(activity: Activity?) {
         activity?.let { act ->
             val current = act.requestedOrientation
-            act.requestedOrientation = if (current == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+            act.requestedOrientation = if (current == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                current == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            ) {
                 ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             } else {
-                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             }
         }
     }

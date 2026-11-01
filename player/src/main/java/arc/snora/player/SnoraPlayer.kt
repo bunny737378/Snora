@@ -1,12 +1,9 @@
 package arc.snora.player
 
 import android.content.Context
-import android.media.MediaPlayer
-import android.media.PlaybackParams
+import android.media.AudioManager as AndroidAudioManager
 import android.net.Uri
-import android.os.Build
 import android.view.Surface
-import android.view.SurfaceHolder
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,26 +23,33 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
-    private var mediaPlayer: MediaPlayer? = null
     private var currentSurface: Surface? = null
     private var progressJob: Job? = null
     private var currentPathOrUri: String = ""
     private var isMpvInitialized: Boolean = false
-    private var isMpvActive: Boolean = false
+    private var isMpvPlaying: Boolean = false
+    private var voInUse: String = "gpu"
+
+    private val systemAudioManager =
+        context.getSystemService(Context.AUDIO_SERVICE) as? AndroidAudioManager
+    private val maxDeviceVolume =
+        systemAudioManager?.getStreamMaxVolume(AndroidAudioManager.STREAM_MUSIC) ?: 15
 
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
     val videoRenderer = VideoRenderer(this)
 
     init {
+        ensureMpvCreated()
         try {
             MPVLib.addObserver(this)
         } catch (t: Throwable) {
         }
+        val currentSysVol = systemAudioManager?.getStreamVolume(AndroidAudioManager.STREAM_MUSIC) ?: 10
+        val initialLevel = ((currentSysVol.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f).toInt().coerceIn(1, 15)
         _playbackState.value = _playbackState.value.copy(
-            videoInfo = VideoInfo(
-                hwdecActive = "libsnora (MPV Native Core)"
-            )
+            volumeLevel = initialLevel,
+            videoInfo = VideoInfo(hwdecActive = "HW")
         )
     }
 
@@ -53,9 +57,28 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         if (!isMpvInitialized) {
             try {
                 MPVLib.create(context.applicationContext)
-                MPVLib.init()
-                MPVLib.setOptionString("hwdec", "auto")
+                MPVLib.setOptionString("profile", "fast")
                 MPVLib.setOptionString("vo", "gpu")
+                MPVLib.setOptionString("hwdec", "auto")
+                MPVLib.setOptionString("hwdec-codecs", "all")
+                MPVLib.setOptionString("video-sync", "audio")
+                MPVLib.setOptionString("ao", "audiotrack,opensles")
+                MPVLib.setOptionString("volume-max", "200")
+                MPVLib.setOptionString("keep-open", "yes")
+                MPVLib.setOptionString("idle", "yes")
+                MPVLib.init()
+
+                MPVLib.setOptionString("force-window", "no")
+
+                MPVLib.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NONE)
+                MPVLib.observeProperty("hwdec-current", MPVLib.MpvFormat.MPV_FORMAT_STRING)
+                MPVLib.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+                MPVLib.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+                MPVLib.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+                MPVLib.observeProperty("sub-text", MPVLib.MpvFormat.MPV_FORMAT_STRING)
+                MPVLib.observeProperty("aid", MPVLib.MpvFormat.MPV_FORMAT_INT64)
+                MPVLib.observeProperty("sid", MPVLib.MpvFormat.MPV_FORMAT_INT64)
+
                 isMpvInitialized = true
             } catch (t: Throwable) {
                 isMpvInitialized = false
@@ -63,418 +86,432 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         }
     }
 
-    private fun getOrCreateMediaPlayer(): MediaPlayer {
-        mediaPlayer?.let { return it }
-        val player = MediaPlayer().apply {
-            setOnPreparedListener { mp ->
-                val duration = mp.duration.toLong().coerceAtLeast(0L)
-                _playbackState.value = _playbackState.value.copy(
-                    status = PlaybackStatus.PLAYING,
-                    durationMs = if (duration > 0) duration else _playbackState.value.durationMs
-                )
-                refreshTracks()
-                videoRenderer.refreshVideoInfo()
-                mp.start()
-                startProgressTracker()
-            }
-            setOnCompletionListener {
-                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.ENDED)
-            }
-            setOnErrorListener { _, what, extra ->
-                _playbackState.value = _playbackState.value.copy(
-                    status = PlaybackStatus.ERROR,
-                    errorMessage = "Playback error: $what, extra: $extra"
-                )
-                true
-            }
-            setOnVideoSizeChangedListener { _, width, height ->
-                if (width > 0 && height > 0) {
-                    val current = _playbackState.value.videoInfo
-                    _playbackState.value = _playbackState.value.copy(
-                        videoInfo = current.copy(width = width, height = height)
-                    )
-                }
-            }
-        }
-        currentSurface?.let { player.setSurface(it) }
-        mediaPlayer = player
-        return player
-    }
-
     fun attachSurface(surface: Surface) {
         currentSurface = surface
         try {
             ensureMpvCreated()
             MPVLib.attachSurface(surface)
+            MPVLib.setOptionString("force-window", "yes")
+            MPVLib.setPropertyString("vo", voInUse)
+
+            if (currentPathOrUri.isNotEmpty() && !isMpvPlaying) {
+                playMedia(currentPathOrUri, 0L)
+            }
         } catch (t: Throwable) {
-        }
-        try {
-            mediaPlayer?.setSurface(surface)
-        } catch (e: Exception) {
         }
     }
 
-    fun attachSurfaceHolder(holder: SurfaceHolder) {
-        attachSurface(holder.surface)
+    fun onSurfaceChanged(width: Int, height: Int) {
         try {
-            mediaPlayer?.setDisplay(holder)
-        } catch (e: Exception) {
+            MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+        } catch (t: Throwable) {
         }
     }
 
     fun detachSurface() {
         currentSurface = null
         try {
+            MPVLib.setPropertyString("vo", "null")
+            MPVLib.setPropertyString("force-window", "no")
             MPVLib.detachSurface()
         } catch (t: Throwable) {
-        }
-        try {
-            mediaPlayer?.setSurface(null)
-        } catch (e: Exception) {
         }
     }
 
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
         currentPathOrUri = pathOrUri
+        ensureMpvCreated()
 
-        try {
-            ensureMpvCreated()
-            playWithMpv(pathOrUri, startPositionMs)
-            return
-        } catch (t: Throwable) {
+        isMpvPlaying = true
+        currentSurface?.let {
+            try {
+                MPVLib.attachSurface(it)
+                MPVLib.setOptionString("force-window", "yes")
+                MPVLib.setPropertyString("vo", voInUse)
+            } catch (t: Throwable) {
+            }
         }
 
-        val player = getOrCreateMediaPlayer()
+        _playbackState.value = _playbackState.value.copy(
+            status = PlaybackStatus.PLAYING,
+            positionMs = 0L,
+            errorMessage = null
+        )
+
         try {
-            isMpvActive = false
-            progressJob?.cancel()
-            player.reset()
-            currentSurface?.let { player.setSurface(it) }
-
-            if (pathOrUri.startsWith("content://") || pathOrUri.startsWith("file://") || pathOrUri.startsWith("http://") || pathOrUri.startsWith("https://")) {
-                player.setDataSource(context, Uri.parse(pathOrUri))
-            } else {
-                player.setDataSource(pathOrUri)
-            }
-
-            _playbackState.value = _playbackState.value.copy(
-                status = PlaybackStatus.BUFFERING,
-                positionMs = startPositionMs,
-                videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "Hardware (MediaCodec)")
-            )
-
-            player.prepareAsync()
+            MPVLib.command(arrayOf("loadfile", pathOrUri))
+            MPVLib.setPropertyBoolean("pause", false)
         } catch (t: Throwable) {
             _playbackState.value = _playbackState.value.copy(
                 status = PlaybackStatus.ERROR,
                 errorMessage = t.localizedMessage ?: "Failed to open video"
             )
         }
-    }
-
-    private fun playWithMpv(pathOrUri: String, startPositionMs: Long = 0L) {
-        isMpvActive = true
-        mediaPlayer?.reset()
-        currentSurface?.let { MPVLib.attachSurface(it) }
-
-        _playbackState.value = _playbackState.value.copy(
-            status = PlaybackStatus.PLAYING,
-            positionMs = startPositionMs,
-            videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "libsnora (MPV Native Core)")
-        )
-
-        MPVLib.command(arrayOf("loadfile", pathOrUri))
-        if (startPositionMs > 0L) {
-            val startSec = (startPositionMs / 1000.0).toString()
-            MPVLib.command(arrayOf("seek", startSec, "absolute"))
-        }
 
         startMpvProgressTracker()
+
+        playerScope.launch {
+            delay(400)
+            refreshTracks()
+            delay(800)
+            refreshTracks()
+            delay(1500)
+            refreshTracks()
+        }
+    }
+
+    fun refreshTracks() {
+        try {
+            val count = MPVLib.getPropertyInt("track-list/count") ?: 0
+            val trackList = mutableListOf<TrackItem>()
+            val currentAid = MPVLib.getPropertyInt("aid") ?: -1
+            val currentSid = MPVLib.getPropertyInt("sid") ?: -1
+
+            for (i in 0 until count) {
+                val typeStr = MPVLib.getPropertyString("track-list/$i/type") ?: continue
+                val trackType = when (typeStr.lowercase()) {
+                    "audio" -> TrackType.AUDIO
+                    "sub" -> TrackType.SUBTITLE
+                    "video" -> TrackType.VIDEO
+                    else -> continue
+                }
+                val trackId = MPVLib.getPropertyInt("track-list/$i/id") ?: (i + 1)
+                val title = MPVLib.getPropertyString("track-list/$i/title") ?: ""
+                val lang = MPVLib.getPropertyString("track-list/$i/lang") ?: "und"
+                val codec = MPVLib.getPropertyString("track-list/$i/codec") ?: ""
+                val isSelected = MPVLib.getPropertyBoolean("track-list/$i/selected") ?: (
+                    (trackType == TrackType.AUDIO && trackId == currentAid) ||
+                    (trackType == TrackType.SUBTITLE && trackId == currentSid)
+                )
+
+                val displayTitle = when {
+                    title.isNotBlank() && lang != "und" -> "$title [$lang]"
+                    title.isNotBlank() -> title
+                    lang != "und" -> "${typeStr.replaceFirstChar { it.uppercase() }} Track $trackId ($lang)"
+                    else -> "${typeStr.replaceFirstChar { it.uppercase() }} Track $trackId"
+                }
+
+                trackList.add(
+                    TrackItem(
+                        id = trackId,
+                        type = trackType,
+                        title = displayTitle,
+                        lang = lang,
+                        codec = codec.uppercase(),
+                        isSelected = isSelected
+                    )
+                )
+            }
+
+            val chaptersCount = MPVLib.getPropertyInt("chapter-list/count") ?: 0
+            val chapterList = mutableListOf<ChapterItem>()
+            for (c in 0 until chaptersCount) {
+                val cTitle = MPVLib.getPropertyString("chapter-list/$c/title") ?: "Chapter ${c + 1}"
+                val cStart = ((MPVLib.getPropertyDouble("chapter-list/$c/time") ?: 0.0) * 1000).toLong()
+                val cEnd = if (c + 1 < chaptersCount) {
+                    ((MPVLib.getPropertyDouble("chapter-list/${c + 1}/time") ?: 0.0) * 1000).toLong()
+                } else {
+                    _playbackState.value.durationMs
+                }
+                chapterList.add(ChapterItem(c, cTitle, cStart, cEnd))
+            }
+
+            _playbackState.value = _playbackState.value.copy(
+                tracks = trackList,
+                chapters = chapterList,
+                selectedAudioTrackId = currentAid,
+                selectedSubtitleTrackId = currentSid
+            )
+        } catch (t: Throwable) {
+        }
     }
 
     private fun startMpvProgressTracker() {
         progressJob?.cancel()
         progressJob = playerScope.launch {
-            while (isActive && isMpvActive) {
-                val timePosSec = MPVLib.getPropertyDouble("time-pos") ?: 0.0
-                val durationSec = MPVLib.getPropertyDouble("duration") ?: 0.0
-                val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
+            while (isActive && isMpvPlaying) {
+                try {
+                    val timePosSec = MPVLib.getPropertyDouble("time-pos") ?: 0.0
+                    val durationSec = MPVLib.getPropertyDouble("duration") ?: 0.0
+                    val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
 
-                val posMs = (timePosSec * 1000).toLong().coerceAtLeast(0L)
-                val durMs = (durationSec * 1000).toLong().coerceAtLeast(0L)
+                    val posMs = (timePosSec * 1000).toLong().coerceAtLeast(0L)
+                    val durMs = (durationSec * 1000).toLong().coerceAtLeast(0L)
 
-                val width = MPVLib.getPropertyInt("video-out-params/dw") ?: MPVLib.getPropertyInt("width") ?: 0
-                val height = MPVLib.getPropertyInt("video-out-params/dh") ?: MPVLib.getPropertyInt("height") ?: 0
+                    val width = MPVLib.getPropertyInt("video-out-params/dw")
+                        ?: MPVLib.getPropertyInt("width") ?: 0
+                    val height = MPVLib.getPropertyInt("video-out-params/dh")
+                        ?: MPVLib.getPropertyInt("height") ?: 0
+                    val fps = MPVLib.getPropertyDouble("container-fps") ?: 0.0
+                    val hwdecCurrent = MPVLib.getPropertyString("hwdec-current") ?: "no"
 
-                val currentInfo = _playbackState.value.videoInfo
-                var newInfo = currentInfo
-                if (width > 0 && height > 0 && (currentInfo.width != width || currentInfo.height != height)) {
-                    newInfo = currentInfo.copy(width = width, height = height)
+                    val isHwWorking = hwdecCurrent.isNotBlank() && hwdecCurrent != "no"
+                    val hwMode = if (isHwWorking) HwDecMode.AUTO else HwDecMode.SW
+
+                    val currentInfo = _playbackState.value.videoInfo
+                    val newInfo = currentInfo.copy(
+                        width = if (width > 0) width else currentInfo.width,
+                        height = if (height > 0) height else currentInfo.height,
+                        fps = if (fps > 0) fps else currentInfo.fps,
+                        hwdecActive = if (isHwWorking) "HW ($hwdecCurrent)" else "SW"
+                    )
+
+                    _playbackState.value = _playbackState.value.copy(
+                        durationMs = if (durMs > 0) durMs else _playbackState.value.durationMs,
+                        positionMs = posMs,
+                        videoInfo = newInfo,
+                        hwDecMode = hwMode,
+                        hwDecCurrent = hwdecCurrent,
+                        status = when {
+                            isPaused -> PlaybackStatus.PAUSED
+                            durMs > 0 && posMs >= durMs -> PlaybackStatus.ENDED
+                            else -> PlaybackStatus.PLAYING
+                        }
+                    )
+                } catch (t: Throwable) {
                 }
-
-                _playbackState.value = _playbackState.value.copy(
-                    durationMs = if (durMs > 0) durMs else _playbackState.value.durationMs,
-                    positionMs = posMs,
-                    videoInfo = newInfo,
-                    status = when {
-                        isPaused -> PlaybackStatus.PAUSED
-                        durMs > 0 && posMs >= durMs -> PlaybackStatus.ENDED
-                        else -> PlaybackStatus.PLAYING
-                    }
-                )
-                delay(250)
+                delay(200)
             }
         }
     }
 
     fun pause() {
-        if (isMpvActive) {
-            try {
-                MPVLib.setPropertyBoolean("pause", true)
-                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
-            } catch (t: Throwable) {
-            }
-            return
-        }
         try {
-            mediaPlayer?.let {
-                if (it.isPlaying) it.pause()
-            }
+            MPVLib.setPropertyBoolean("pause", true)
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
         }
     }
 
     fun resume() {
-        if (isMpvActive) {
-            try {
-                MPVLib.setPropertyBoolean("pause", false)
-                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
-            } catch (t: Throwable) {
-            }
-            return
-        }
         try {
-            mediaPlayer?.let {
-                it.start()
-                startProgressTracker()
-            }
+            MPVLib.setPropertyBoolean("pause", false)
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
         }
     }
 
     fun togglePlayPause() {
-        if (isMpvActive) {
+        try {
             val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
             if (isPaused) {
                 resume()
             } else {
                 pause()
             }
-            return
-        }
-        val player = mediaPlayer ?: return
-        try {
-            if (player.isPlaying) {
-                pause()
-            } else {
-                resume()
-            }
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
         }
     }
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
-        if (isMpvActive) {
+        try {
             val sec = (clamped / 1000.0).toString()
             MPVLib.command(arrayOf("seek", sec, "absolute"))
             _playbackState.value = _playbackState.value.copy(positionMs = clamped)
-            return
-        }
-        try {
-            val player = mediaPlayer ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                player.seekTo(clamped, MediaPlayer.SEEK_CLOSEST)
-            } else {
-                player.seekTo(clamped.toInt())
-            }
-            _playbackState.value = _playbackState.value.copy(positionMs = clamped)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
         }
     }
 
     fun seekRelative(deltaSeconds: Double) {
-        if (isMpvActive) {
+        try {
             MPVLib.command(arrayOf("seek", deltaSeconds.toString(), "relative"))
-            return
+        } catch (t: Throwable) {
         }
-        val current = _playbackState.value.positionMs
-        val target = current + (deltaSeconds * 1000).toLong()
-        seekTo(target)
     }
 
     fun setSpeed(speed: Float) {
         val clamped = speed.coerceIn(0.25f, 4.0f)
-        if (isMpvActive) {
-            try {
-                MPVLib.setPropertyDouble("speed", clamped.toDouble())
-                _playbackState.value = _playbackState.value.copy(speed = clamped)
-            } catch (t: Throwable) {
-            }
-            return
-        }
         try {
-            val player = mediaPlayer ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val params = player.playbackParams ?: PlaybackParams()
-                params.speed = clamped
-                player.playbackParams = params
-            }
+            MPVLib.setPropertyDouble("speed", clamped.toDouble())
             _playbackState.value = _playbackState.value.copy(speed = clamped)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
         }
     }
 
     fun setAspectRatioMode(mode: AspectRatioMode) {
-        val aspectString = when (mode) {
-            AspectRatioMode.FIT -> "-1"
-            AspectRatioMode.CROP -> "16:9"
-            AspectRatioMode.STRETCH -> "4:3"
-            else -> "-1"
-        }
-        if (isMpvActive) {
-            try {
-                MPVLib.setPropertyString("video-aspect-override", aspectString)
-            } catch (t: Throwable) {
+        try {
+            when (mode) {
+                AspectRatioMode.FIT -> {
+                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyDouble("panscan", 0.0)
+                    MPVLib.setPropertyString("video-aspect-override", "-1")
+                }
+                AspectRatioMode.CROP -> {
+                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyDouble("panscan", 1.0)
+                    MPVLib.setPropertyString("video-aspect-override", "-1")
+                }
+                AspectRatioMode.FILL -> {
+                    MPVLib.setOptionString("keepaspect", "no")
+                    MPVLib.setPropertyDouble("panscan", 0.0)
+                    MPVLib.setPropertyString("video-aspect-override", "-1")
+                }
+                AspectRatioMode.RATIO_16_9 -> {
+                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyDouble("panscan", 0.0)
+                    MPVLib.setPropertyString("video-aspect-override", "16:9")
+                }
+                AspectRatioMode.RATIO_1_1 -> {
+                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyDouble("panscan", 0.0)
+                    MPVLib.setPropertyString("video-aspect-override", "1:1")
+                }
+                AspectRatioMode.RATIO_4_3 -> {
+                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyDouble("panscan", 0.0)
+                    MPVLib.setPropertyString("video-aspect-override", "4:3")
+                }
             }
+        } catch (t: Throwable) {
         }
         _playbackState.value = _playbackState.value.copy(aspectRatioMode = mode)
     }
 
-    fun setZoom(zoom: Float) {
-        val clamped = zoom.coerceIn(0.5f, 3.0f)
-        if (isMpvActive) {
+    fun toggleHwDec() {
+        val currentMode = _playbackState.value.hwDecMode
+        if (currentMode == HwDecMode.AUTO) {
             try {
-                MPVLib.setPropertyDouble("video-zoom", (clamped - 1.0).toDouble())
+                MPVLib.setPropertyString("hwdec", "no")
+                _playbackState.value = _playbackState.value.copy(
+                    hwDecMode = HwDecMode.SW,
+                    hwDecCurrent = "no",
+                    videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "SW")
+                )
+            } catch (t: Throwable) {
+            }
+        } else {
+            if (_playbackState.value.hwDecFailed) {
+                return
+            }
+            try {
+                MPVLib.setPropertyString("hwdec", "auto")
+                playerScope.launch {
+                    delay(350)
+                    val current = MPVLib.getPropertyString("hwdec-current") ?: "no"
+                    if (current == "no" || current.isEmpty()) {
+                        _playbackState.value = _playbackState.value.copy(
+                            hwDecFailed = true,
+                            hwDecMode = HwDecMode.SW,
+                            hwDecCurrent = "no",
+                            videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "SW (HW Unavailable)")
+                        )
+                    } else {
+                        _playbackState.value = _playbackState.value.copy(
+                            hwDecFailed = false,
+                            hwDecMode = HwDecMode.AUTO,
+                            hwDecCurrent = current,
+                            videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "HW ($current)")
+                        )
+                    }
+                }
             } catch (t: Throwable) {
             }
         }
     }
 
-    fun setHardwareAccelerationEnabled(enabled: Boolean) {
-        if (isMpvActive) {
+    fun setHwDecMode(mode: HwDecMode) {
+        val target = if (mode == HwDecMode.AUTO) "auto" else "no"
+        try {
+            MPVLib.setPropertyString("hwdec", target)
+            _playbackState.value = _playbackState.value.copy(
+                hwDecMode = mode,
+                hwDecCurrent = if (mode == HwDecMode.AUTO) "auto" else "no",
+                videoInfo = _playbackState.value.videoInfo.copy(
+                    hwdecActive = if (mode == HwDecMode.AUTO) "HW" else "SW"
+                )
+            )
+        } catch (t: Throwable) {
+        }
+    }
+
+    fun setVolume30(level: Int) {
+        val clamped = level.coerceIn(0, 30)
+        _playbackState.value = _playbackState.value.copy(volumeLevel = clamped)
+
+        if (clamped <= 15) {
+            val deviceTarget = ((clamped.toFloat() / 15f) * maxDeviceVolume.toFloat()).toInt().coerceIn(0, maxDeviceVolume)
             try {
-                MPVLib.setPropertyString("hwdec", if (enabled) "auto" else "no")
+                systemAudioManager?.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, deviceTarget, 0)
+                MPVLib.setPropertyDouble("volume", 100.0)
+            } catch (t: Throwable) {
+            }
+        } else {
+            val boostSteps = clamped - 15
+            val boostPercent = 100.0 + (boostSteps.toDouble() / 15.0) * 100.0
+            try {
+                systemAudioManager?.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, maxDeviceVolume, 0)
+                MPVLib.setPropertyDouble("volume", boostPercent)
             } catch (t: Throwable) {
             }
         }
-        val mode = if (enabled) HwDecMode.AUTO else HwDecMode.SW
-        _playbackState.value = _playbackState.value.copy(hwDecMode = mode)
     }
 
     fun setControlsLocked(locked: Boolean) {
         _playbackState.value = _playbackState.value.copy(isControlsLocked = locked)
     }
 
-    fun selectTrack(type: TrackType, trackIndex: Int) {
-        if (isMpvActive) {
+    fun selectTrack(type: TrackType, trackId: Int) {
+        try {
             val prop = when (type) {
                 TrackType.AUDIO -> "aid"
                 TrackType.SUBTITLE -> "sid"
                 TrackType.VIDEO -> "vid"
             }
-            val valStr = if (trackIndex < 0) "no" else (trackIndex + 1).toString()
-            try {
-                MPVLib.setPropertyString(prop, valStr)
-            } catch (t: Throwable) {
-            }
+            val valStr = if (trackId < 0) "no" else trackId.toString()
+            MPVLib.setPropertyString(prop, valStr)
+
             val updatedTracks = _playbackState.value.tracks.map { track ->
                 if (track.type == type) {
-                    track.copy(isSelected = (track.id == trackIndex))
+                    track.copy(isSelected = (track.id == trackId))
                 } else {
                     track
                 }
             }
-            _playbackState.value = _playbackState.value.copy(tracks = updatedTracks)
-            return
-        }
-
-        try {
-            val player = mediaPlayer ?: return
-            if (trackIndex < 0) {
-                val currentTracks = _playbackState.value.tracks
-                currentTracks.filter { it.type == type && it.isSelected }.forEach {
-                    player.deselectTrack(it.id)
-                }
-                if (type == TrackType.SUBTITLE) {
-                    _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = -1)
-                }
-            } else {
-                player.selectTrack(trackIndex)
-                if (type == TrackType.AUDIO) {
-                    _playbackState.value = _playbackState.value.copy(selectedAudioTrackId = trackIndex)
-                } else if (type == TrackType.SUBTITLE) {
-                    _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = trackIndex)
-                }
-            }
-
-            val updatedTracks = _playbackState.value.tracks.map { track ->
-                if (track.type == type) {
-                    track.copy(isSelected = (track.id == trackIndex))
-                } else {
-                    track
-                }
-            }
-            _playbackState.value = _playbackState.value.copy(tracks = updatedTracks)
-        } catch (e: Exception) {
+            _playbackState.value = _playbackState.value.copy(
+                tracks = updatedTracks,
+                selectedAudioTrackId = if (type == TrackType.AUDIO) trackId else _playbackState.value.selectedAudioTrackId,
+                selectedSubtitleTrackId = if (type == TrackType.SUBTITLE) trackId else _playbackState.value.selectedSubtitleTrackId
+            )
+        } catch (t: Throwable) {
         }
     }
 
-    fun refreshTracks() {
-        val player = mediaPlayer ?: return
+    fun loadExternalSubtitle(uriString: String) {
         try {
-            val trackInfoArray = player.trackInfo ?: emptyArray()
-            val trackList = mutableListOf<TrackItem>()
-
-            trackInfoArray.forEachIndexed { index, info ->
-                val trackType = when (info.trackType) {
-                    MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO -> TrackType.AUDIO
-                    MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
-                    MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT -> TrackType.SUBTITLE
-                    MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO -> TrackType.VIDEO
-                    else -> null
-                }
-
-                if (trackType != null) {
-                    val lang = info.language.ifEmpty { "und" }
-                    val format = info.format
-                    val codec = format?.getString("mime") ?: "standard"
-                    val title = "Track ${index + 1} ($lang)"
-
-                    val isSelected = if (trackType == TrackType.AUDIO) {
-                        index == _playbackState.value.selectedAudioTrackId || (_playbackState.value.selectedAudioTrackId == -1 && trackList.none { it.type == TrackType.AUDIO })
-                    } else {
-                        index == _playbackState.value.selectedSubtitleTrackId
-                    }
-
-                    trackList.add(
-                        TrackItem(
-                            id = index,
-                            type = trackType,
-                            title = title,
-                            lang = lang,
-                            codec = codec,
-                            isSelected = isSelected
-                        )
-                    )
-                }
+            MPVLib.command(arrayOf("sub-add", uriString, "select"))
+            playerScope.launch {
+                delay(300)
+                refreshTracks()
             }
-            if (trackList.isNotEmpty()) {
-                _playbackState.value = _playbackState.value.copy(tracks = trackList)
+        } catch (t: Throwable) {
+        }
+    }
+
+    fun loadExternalAudio(uriString: String) {
+        try {
+            MPVLib.command(arrayOf("audio-add", uriString, "select"))
+            playerScope.launch {
+                delay(300)
+                refreshTracks()
             }
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
+        }
+    }
+
+    fun setSubtitleDelay(seconds: Double) {
+        try {
+            MPVLib.setPropertyDouble("sub-delay", seconds)
+            _playbackState.value = _playbackState.value.copy(subDelaySec = seconds)
+        } catch (t: Throwable) {
+        }
+    }
+
+    fun setAudioDelay(seconds: Double) {
+        try {
+            MPVLib.setPropertyDouble("audio-delay", seconds)
+            _playbackState.value = _playbackState.value.copy(audioDelaySec = seconds)
+        } catch (t: Throwable) {
         }
     }
 
@@ -482,39 +519,54 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         _playbackState.value = block(_playbackState.value)
     }
 
-    private fun startProgressTracker() {
-        progressJob?.cancel()
-        progressJob = playerScope.launch {
-            while (isActive) {
-                mediaPlayer?.let { player ->
-                    try {
-                        if (player.isPlaying) {
-                            val currentPos = player.currentPosition.toLong()
-                            _playbackState.value = _playbackState.value.copy(positionMs = currentPos)
-                        }
-                    } catch (e: Exception) {
-                    }
-                }
-                delay(250)
-            }
+    override fun eventProperty(property: String) {
+        if (property == "track-list") {
+            refreshTracks()
         }
     }
 
-    override fun eventProperty(property: String) {}
-    override fun eventProperty(property: String, value: Long) {}
-    override fun eventProperty(property: String, value: Boolean) {}
-    override fun eventProperty(property: String, value: String) {}
+    override fun eventProperty(property: String, value: Long) {
+        if (property == "aid") {
+            _playbackState.value = _playbackState.value.copy(selectedAudioTrackId = value.toInt())
+        } else if (property == "sid") {
+            _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = value.toInt())
+        }
+    }
+
+    override fun eventProperty(property: String, value: Boolean) {
+        if (property == "pause") {
+            _playbackState.value = _playbackState.value.copy(
+                status = if (value) PlaybackStatus.PAUSED else PlaybackStatus.PLAYING
+            )
+        }
+    }
+
+    override fun eventProperty(property: String, value: String) {
+        if (property == "sub-text") {
+            _playbackState.value = _playbackState.value.copy(currentSubtitleText = value)
+        } else if (property == "hwdec-current") {
+            val isHw = value.isNotBlank() && value != "no"
+            _playbackState.value = _playbackState.value.copy(
+                hwDecCurrent = value,
+                hwDecMode = if (isHw) HwDecMode.AUTO else HwDecMode.SW
+            )
+        }
+    }
+
     override fun eventProperty(property: String, value: Double) {}
+
     override fun event(eventId: Int) {
         if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.ENDED)
         } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+            refreshTracks()
         }
     }
 
     fun destroy() {
         progressJob?.cancel()
+        isMpvPlaying = false
         try {
             MPVLib.removeObserver(this)
             if (isMpvInitialized) {
@@ -525,12 +577,6 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             }
         } catch (t: Throwable) {
         }
-        try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-        } catch (e: Exception) {
-        }
-        mediaPlayer = null
         currentSurface = null
         _playbackState.value = PlaybackState(status = PlaybackStatus.IDLE)
     }

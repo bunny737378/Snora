@@ -22,4 +22,5 @@ debug.keystore
 player/src/main/jniLibs/
 player/src/main/cpp/include/*
 !player/src/main/cpp/include/mpv/
+!player/src/main/cpp/include/mpv/**
 app/src/main/cpp/include/
