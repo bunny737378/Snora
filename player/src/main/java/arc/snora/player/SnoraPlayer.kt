@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.view.Surface
 import android.view.SurfaceHolder
+import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,7 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-class SnoraPlayer(private val context: Context) {
+class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     private val playerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -29,18 +30,37 @@ class SnoraPlayer(private val context: Context) {
     private var currentSurface: Surface? = null
     private var progressJob: Job? = null
     private var currentPathOrUri: String = ""
-    private var isNativePlaying: Boolean = false
+    private var isMpvInitialized: Boolean = false
+    private var isMpvActive: Boolean = false
 
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
     val videoRenderer = VideoRenderer(this)
 
     init {
+        try {
+            MPVLib.addObserver(this)
+        } catch (t: Throwable) {
+        }
         _playbackState.value = _playbackState.value.copy(
             videoInfo = VideoInfo(
-                hwdecActive = if (SnoraNativeEngine.isLoaded) "Native FFmpeg C++ (NEWWFFMCREATEE)" else "Hardware (MediaCodec)"
+                hwdecActive = "libsnora (MPV Native Core)"
             )
         )
+    }
+
+    private fun ensureMpvCreated() {
+        if (!isMpvInitialized) {
+            try {
+                MPVLib.create(context.applicationContext)
+                MPVLib.init()
+                MPVLib.setOptionString("hwdec", "auto")
+                MPVLib.setOptionString("vo", "gpu")
+                isMpvInitialized = true
+            } catch (t: Throwable) {
+                isMpvInitialized = false
+            }
+        }
     }
 
     private fun getOrCreateMediaPlayer(): MediaPlayer {
@@ -83,8 +103,10 @@ class SnoraPlayer(private val context: Context) {
 
     fun attachSurface(surface: Surface) {
         currentSurface = surface
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setSurface(surface)
+        try {
+            ensureMpvCreated()
+            MPVLib.attachSurface(surface)
+        } catch (t: Throwable) {
         }
         try {
             mediaPlayer?.setSurface(surface)
@@ -102,8 +124,9 @@ class SnoraPlayer(private val context: Context) {
 
     fun detachSurface() {
         currentSurface = null
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setSurface(null)
+        try {
+            MPVLib.detachSurface()
+        } catch (t: Throwable) {
         }
         try {
             mediaPlayer?.setSurface(null)
@@ -114,17 +137,16 @@ class SnoraPlayer(private val context: Context) {
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
         currentPathOrUri = pathOrUri
 
-        val isMatroska = pathOrUri.lowercase().contains(".mkv") || pathOrUri.lowercase().contains(".webm")
-        val isSwMode = _playbackState.value.hwDecMode == HwDecMode.SW
-
-        if (SnoraNativeEngine.isLoaded && (isMatroska || isSwMode)) {
-            playWithNativeEngine(pathOrUri, startPositionMs)
+        try {
+            ensureMpvCreated()
+            playWithMpv(pathOrUri, startPositionMs)
             return
+        } catch (t: Throwable) {
         }
 
         val player = getOrCreateMediaPlayer()
         try {
-            isNativePlaying = false
+            isMpvActive = false
             progressJob?.cancel()
             player.reset()
             currentSurface?.let { player.setSurface(it) }
@@ -143,72 +165,61 @@ class SnoraPlayer(private val context: Context) {
 
             player.prepareAsync()
         } catch (t: Throwable) {
-            if (SnoraNativeEngine.isLoaded) {
-                playWithNativeEngine(pathOrUri, startPositionMs)
-            } else {
-                _playbackState.value = _playbackState.value.copy(
-                    status = PlaybackStatus.ERROR,
-                    errorMessage = t.localizedMessage ?: "Failed to open video"
-                )
-            }
-        }
-    }
-
-    private fun playWithNativeEngine(pathOrUri: String, startPositionMs: Long = 0L) {
-        isNativePlaying = true
-        mediaPlayer?.reset()
-        currentSurface?.let { SnoraNativeEngine.setSurface(it) }
-
-        _playbackState.value = _playbackState.value.copy(
-            status = PlaybackStatus.PLAYING,
-            positionMs = startPositionMs,
-            videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "Native FFmpeg C++ (NEWWFFMCREATEE)")
-        )
-
-        SnoraNativeEngine.playVideo(pathOrUri)
-        if (startPositionMs > 0L) {
-            SnoraNativeEngine.seekTo(startPositionMs)
-        }
-        startNativeProgressTracker()
-
-        playerScope.launch {
-            delay(500)
-            val nativeTracks = SnoraNativeEngine.getAvailableTracks()
-            val nativeChapters = SnoraNativeEngine.getAvailableChapters()
             _playbackState.value = _playbackState.value.copy(
-                tracks = nativeTracks,
-                chapters = nativeChapters
+                status = PlaybackStatus.ERROR,
+                errorMessage = t.localizedMessage ?: "Failed to open video"
             )
         }
     }
 
-    private fun startNativeProgressTracker() {
+    private fun playWithMpv(pathOrUri: String, startPositionMs: Long = 0L) {
+        isMpvActive = true
+        mediaPlayer?.reset()
+        currentSurface?.let { MPVLib.attachSurface(it) }
+
+        _playbackState.value = _playbackState.value.copy(
+            status = PlaybackStatus.PLAYING,
+            positionMs = startPositionMs,
+            videoInfo = _playbackState.value.videoInfo.copy(hwdecActive = "libsnora (MPV Native Core)")
+        )
+
+        MPVLib.command(arrayOf("loadfile", pathOrUri))
+        if (startPositionMs > 0L) {
+            val startSec = (startPositionMs / 1000.0).toString()
+            MPVLib.command(arrayOf("seek", startSec, "absolute"))
+        }
+
+        startMpvProgressTracker()
+    }
+
+    private fun startMpvProgressTracker() {
         progressJob?.cancel()
         progressJob = playerScope.launch {
-            while (isActive && isNativePlaying) {
-                val dur = SnoraNativeEngine.getDurationMs()
-                val pos = SnoraNativeEngine.getCurrentPositionMs()
-                val isPlaying = SnoraNativeEngine.isPlaying()
-                val subText = SnoraNativeEngine.getCurrentSubtitleText()
+            while (isActive && isMpvActive) {
+                val timePosSec = MPVLib.getPropertyDouble("time-pos") ?: 0.0
+                val durationSec = MPVLib.getPropertyDouble("duration") ?: 0.0
+                val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
 
-                val w = SnoraNativeEngine.getVideoWidth()
-                val h = SnoraNativeEngine.getVideoHeight()
+                val posMs = (timePosSec * 1000).toLong().coerceAtLeast(0L)
+                val durMs = (durationSec * 1000).toLong().coerceAtLeast(0L)
+
+                val width = MPVLib.getPropertyInt("video-out-params/dw") ?: MPVLib.getPropertyInt("width") ?: 0
+                val height = MPVLib.getPropertyInt("video-out-params/dh") ?: MPVLib.getPropertyInt("height") ?: 0
+
                 val currentInfo = _playbackState.value.videoInfo
-
                 var newInfo = currentInfo
-                if (w > 0 && h > 0 && (currentInfo.width != w || currentInfo.height != h)) {
-                    newInfo = currentInfo.copy(width = w, height = h)
+                if (width > 0 && height > 0 && (currentInfo.width != width || currentInfo.height != height)) {
+                    newInfo = currentInfo.copy(width = width, height = height)
                 }
 
                 _playbackState.value = _playbackState.value.copy(
-                    durationMs = if (dur > 0) dur else _playbackState.value.durationMs,
-                    positionMs = pos,
-                    currentSubtitleText = subText,
+                    durationMs = if (durMs > 0) durMs else _playbackState.value.durationMs,
+                    positionMs = posMs,
                     videoInfo = newInfo,
                     status = when {
-                        isPlaying -> PlaybackStatus.PLAYING
-                        dur > 0 && pos >= dur -> PlaybackStatus.ENDED
-                        else -> PlaybackStatus.PAUSED
+                        isPaused -> PlaybackStatus.PAUSED
+                        durMs > 0 && posMs >= durMs -> PlaybackStatus.ENDED
+                        else -> PlaybackStatus.PLAYING
                     }
                 )
                 delay(250)
@@ -217,9 +228,12 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun pause() {
-        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.stop()
-            _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyBoolean("pause", true)
+                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
+            } catch (t: Throwable) {
+            }
             return
         }
         try {
@@ -232,8 +246,12 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun resume() {
-        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            playWithNativeEngine(currentPathOrUri, _playbackState.value.positionMs)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyBoolean("pause", false)
+                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+            } catch (t: Throwable) {
+            }
             return
         }
         try {
@@ -247,11 +265,12 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun togglePlayPause() {
-        if (isNativePlaying) {
-            if (_playbackState.value.status == PlaybackStatus.PLAYING) {
-                pause()
-            } else {
+        if (isMpvActive) {
+            val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
+            if (isPaused) {
                 resume()
+            } else {
+                pause()
             }
             return
         }
@@ -268,8 +287,9 @@ class SnoraPlayer(private val context: Context) {
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
-        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.seekTo(clamped)
+        if (isMpvActive) {
+            val sec = (clamped / 1000.0).toString()
+            MPVLib.command(arrayOf("seek", sec, "absolute"))
             _playbackState.value = _playbackState.value.copy(positionMs = clamped)
             return
         }
@@ -286,6 +306,10 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun seekRelative(deltaSeconds: Double) {
+        if (isMpvActive) {
+            MPVLib.command(arrayOf("seek", deltaSeconds.toString(), "relative"))
+            return
+        }
         val current = _playbackState.value.positionMs
         val target = current + (deltaSeconds * 1000).toLong()
         seekTo(target)
@@ -293,9 +317,12 @@ class SnoraPlayer(private val context: Context) {
 
     fun setSpeed(speed: Float) {
         val clamped = speed.coerceIn(0.25f, 4.0f)
-        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setSpeed(clamped)
-            _playbackState.value = _playbackState.value.copy(speed = clamped)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyDouble("speed", clamped.toDouble())
+                _playbackState.value = _playbackState.value.copy(speed = clamped)
+            } catch (t: Throwable) {
+            }
             return
         }
         try {
@@ -311,28 +338,37 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun setAspectRatioMode(mode: AspectRatioMode) {
-        val modeInt = when (mode) {
-            AspectRatioMode.FIT -> 0
-            AspectRatioMode.CROP -> 1
-            AspectRatioMode.STRETCH -> 2
-            else -> 0
+        val aspectString = when (mode) {
+            AspectRatioMode.FIT -> "-1"
+            AspectRatioMode.CROP -> "16:9"
+            AspectRatioMode.STRETCH -> "4:3"
+            else -> "-1"
         }
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setAspectRatioMode(modeInt)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyString("video-aspect-override", aspectString)
+            } catch (t: Throwable) {
+            }
         }
         _playbackState.value = _playbackState.value.copy(aspectRatioMode = mode)
     }
 
     fun setZoom(zoom: Float) {
         val clamped = zoom.coerceIn(0.5f, 3.0f)
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setZoom(clamped)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyDouble("video-zoom", (clamped - 1.0).toDouble())
+            } catch (t: Throwable) {
+            }
         }
     }
 
     fun setHardwareAccelerationEnabled(enabled: Boolean) {
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.setHardwareAccelerationEnabled(enabled)
+        if (isMpvActive) {
+            try {
+                MPVLib.setPropertyString("hwdec", if (enabled) "auto" else "no")
+            } catch (t: Throwable) {
+            }
         }
         val mode = if (enabled) HwDecMode.AUTO else HwDecMode.SW
         _playbackState.value = _playbackState.value.copy(hwDecMode = mode)
@@ -343,13 +379,16 @@ class SnoraPlayer(private val context: Context) {
     }
 
     fun selectTrack(type: TrackType, trackIndex: Int) {
-        if (isNativePlaying && SnoraNativeEngine.isLoaded) {
-            if (type == TrackType.AUDIO) {
-                SnoraNativeEngine.setAudioTrack(trackIndex)
-                _playbackState.value = _playbackState.value.copy(selectedAudioTrackId = trackIndex)
-            } else if (type == TrackType.SUBTITLE) {
-                SnoraNativeEngine.setSubtitleTrack(trackIndex)
-                _playbackState.value = _playbackState.value.copy(selectedSubtitleTrackId = trackIndex)
+        if (isMpvActive) {
+            val prop = when (type) {
+                TrackType.AUDIO -> "aid"
+                TrackType.SUBTITLE -> "sid"
+                TrackType.VIDEO -> "vid"
+            }
+            val valStr = if (trackIndex < 0) "no" else (trackIndex + 1).toString()
+            try {
+                MPVLib.setPropertyString(prop, valStr)
+            } catch (t: Throwable) {
             }
             val updatedTracks = _playbackState.value.tracks.map { track ->
                 if (track.type == type) {
@@ -461,11 +500,30 @@ class SnoraPlayer(private val context: Context) {
         }
     }
 
+    override fun eventProperty(property: String) {}
+    override fun eventProperty(property: String, value: Long) {}
+    override fun eventProperty(property: String, value: Boolean) {}
+    override fun eventProperty(property: String, value: String) {}
+    override fun eventProperty(property: String, value: Double) {}
+    override fun event(eventId: Int) {
+        if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
+            _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.ENDED)
+        } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
+            _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+        }
+    }
+
     fun destroy() {
         progressJob?.cancel()
-        if (SnoraNativeEngine.isLoaded) {
-            SnoraNativeEngine.stop()
-            SnoraNativeEngine.setSurface(null)
+        try {
+            MPVLib.removeObserver(this)
+            if (isMpvInitialized) {
+                MPVLib.command(arrayOf("stop"))
+                MPVLib.detachSurface()
+                MPVLib.destroy()
+                isMpvInitialized = false
+            }
+        } catch (t: Throwable) {
         }
         try {
             mediaPlayer?.stop()

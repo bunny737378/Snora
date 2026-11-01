@@ -40,7 +40,6 @@ add_library(player SHARED
     property.cpp
     event.cpp
     thumbnail.cpp
-    snora-player.cpp
 )
 
 target_link_libraries(player
@@ -53,7 +52,6 @@ target_link_libraries(player
     avfilter
     avdevice
     android
-    aaudio
     log
     EGL
     GLESv2
