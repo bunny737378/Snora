@@ -40,10 +40,17 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Download FFmpeg and Snora Libraries from Newffmmmmm Release
+      - name: Download FFmpeg, Snora and MPV Headers
         run: |
           mkdir -p player/src/main/jniLibs/arm64-v8a player/src/main/jniLibs/armeabi-v7a
-          mkdir -p player/src/main/cpp/include app/src/main/cpp/include
+          mkdir -p player/src/main/cpp/include/mpv app/src/main/cpp/include
+
+          echo "Ensuring mpv headers exist..."
+          if [ ! -f "player/src/main/cpp/include/mpv/client.h" ]; then
+            curl -s https://raw.githubusercontent.com/mpv-player/mpv/master/include/mpv/client.h -o player/src/main/cpp/include/mpv/client.h
+            curl -s https://raw.githubusercontent.com/mpv-player/mpv/master/include/mpv/render.h -o player/src/main/cpp/include/mpv/render.h
+            curl -s https://raw.githubusercontent.com/mpv-player/mpv/master/include/mpv/render_gl.h -o player/src/main/cpp/include/mpv/render_gl.h
+          fi
 
           echo "Downloading FFmpeg and Snora native release from Newffmmmmm..."
           mkdir -p /tmp/ffmpeg_ci
@@ -63,9 +70,9 @@ jobs:
             unzip -j -q /tmp/ndk_ci/mpv.apk "lib/armeabi-v7a/libc++_shared.so" -d player/src/main/jniLibs/armeabi-v7a/
           fi
 
-          echo "Native libraries verified:"
+          echo "Native libraries and headers verified:"
           ls -lh player/src/main/jniLibs/arm64-v8a/
-          ls -lh player/src/main/jniLibs/armeabi-v7a/
+          ls -la player/src/main/cpp/include/mpv/
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew

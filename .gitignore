@@ -17,8 +17,9 @@ local.properties
 .env
 debug.keystore
 
-# Native libraries and header files dynamically fetched during CI build
+# Native libraries and dynamically downloaded include headers
 /native-libs/
 player/src/main/jniLibs/
-player/src/main/cpp/include/
+player/src/main/cpp/include/*
+!player/src/main/cpp/include/mpv/
 app/src/main/cpp/include/
