@@ -1,6 +1,7 @@
 package arc.snora.player
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.AudioManager as AndroidAudioManager
 import android.net.Uri
 import android.view.Surface
@@ -38,6 +39,11 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
     val videoRenderer = VideoRenderer(this)
+    val thumbnailLoader = ThumbnailLoader(context)
+
+    suspend fun loadThumbnailFrame(timeMs: Long): Bitmap? {
+        return thumbnailLoader.loadFrame(timeMs)
+    }
 
     init {
         ensureMpvCreated()
@@ -120,6 +126,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
         currentPathOrUri = pathOrUri
+        thumbnailLoader.setDataSource(pathOrUri)
         ensureMpvCreated()
 
         isMpvPlaying = true
@@ -471,7 +478,8 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             _playbackState.value = _playbackState.value.copy(
                 tracks = updatedTracks,
                 selectedAudioTrackId = if (type == TrackType.AUDIO) trackId else _playbackState.value.selectedAudioTrackId,
-                selectedSubtitleTrackId = if (type == TrackType.SUBTITLE) trackId else _playbackState.value.selectedSubtitleTrackId
+                selectedSubtitleTrackId = if (type == TrackType.SUBTITLE) trackId else _playbackState.value.selectedSubtitleTrackId,
+                currentSubtitleText = if (type == TrackType.SUBTITLE && trackId < 0) "" else _playbackState.value.currentSubtitleText
             )
         } catch (t: Throwable) {
         }
@@ -543,7 +551,8 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     override fun eventProperty(property: String, value: String) {
         if (property == "sub-text") {
-            _playbackState.value = _playbackState.value.copy(currentSubtitleText = value)
+            val text = if (_playbackState.value.selectedSubtitleTrackId == -1) "" else value
+            _playbackState.value = _playbackState.value.copy(currentSubtitleText = text)
         } else if (property == "hwdec-current") {
             val isHw = value.isNotBlank() && value != "no"
             _playbackState.value = _playbackState.value.copy(
@@ -568,6 +577,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         progressJob?.cancel()
         isMpvPlaying = false
         try {
+            thumbnailLoader.release()
             MPVLib.removeObserver(this)
             if (isMpvInitialized) {
                 MPVLib.command(arrayOf("stop"))

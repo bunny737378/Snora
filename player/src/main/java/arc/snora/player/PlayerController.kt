@@ -3,6 +3,7 @@ package arc.snora.player
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.provider.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -132,7 +133,7 @@ class PlayerController(
             accumulatedVolumeDelta -= steps
 
             val isBoost = target > 15
-            val label = if (isBoost) "$target (Boost)" else "$target / 15"
+            val label = "$target%"
             val progress = target.toFloat() / 30f
 
             showGestureOverlay(
@@ -238,6 +239,74 @@ class PlayerController(
             _isHudVisible.value = false
         } else {
             showHud()
+        }
+    }
+
+    private var wasPlayingBeforeSlide: Boolean = false
+    private var thumbnailJob: Job? = null
+    private var lastLoadedBitmap: android.graphics.Bitmap? = null
+
+    fun onSlideSeekStart() {
+        dismissGestureOverlayImmediately()
+        hideHud()
+        val currentStatus = player.playbackState.value.status
+        wasPlayingBeforeSlide = (currentStatus == PlaybackStatus.PLAYING)
+        if (wasPlayingBeforeSlide) {
+            player.pause()
+        }
+        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
+        val pos = player.playbackState.value.positionMs
+        val initialFraction = (pos.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+        player.updateState {
+            it.copy(
+                slideSeekState = SlideSeekState(
+                    isActive = true,
+                    targetMs = pos,
+                    seekFraction = initialFraction,
+                    thumbnailBitmap = lastLoadedBitmap
+                )
+            )
+        }
+    }
+
+    fun onSlideSeek(fraction: Float) {
+        val clampedFraction = fraction.coerceIn(0f, 1f)
+        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
+        val targetMs = (clampedFraction * duration).toLong().coerceIn(0L, duration)
+
+        player.updateState {
+            it.copy(
+                slideSeekState = it.slideSeekState.copy(
+                    isActive = true,
+                    targetMs = targetMs,
+                    seekFraction = clampedFraction
+                )
+            )
+        }
+
+        thumbnailJob?.cancel()
+        thumbnailJob = scope.launch {
+            val bmp = player.loadThumbnailFrame(targetMs)
+            if (bmp != null) {
+                lastLoadedBitmap = bmp
+                player.updateState {
+                    if (it.slideSeekState.isActive) {
+                        it.copy(slideSeekState = it.slideSeekState.copy(thumbnailBitmap = bmp))
+                    } else it
+                }
+            }
+        }
+    }
+
+    fun onSlideSeekEnd() {
+        thumbnailJob?.cancel()
+        val targetMs = player.playbackState.value.slideSeekState.targetMs
+        player.seekTo(targetMs)
+        player.updateState {
+            it.copy(slideSeekState = SlideSeekState(isActive = false))
+        }
+        if (wasPlayingBeforeSlide) {
+            player.resume()
         }
     }
 }

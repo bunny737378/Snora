@@ -2,45 +2,50 @@ package arc.snora.player
 
 import android.content.res.Configuration
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
@@ -58,16 +63,20 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlayerControls(
     state: PlaybackState,
@@ -80,10 +89,11 @@ fun PlayerControls(
     onSeekRelative: (Double) -> Unit,
     onSetSpeed: (Float) -> Unit,
     onSelectAspectRatio: (AspectRatioMode) -> Unit,
+    onCycleAspectRatio: () -> Unit,
     onToggleLock: () -> Unit,
-    onToggleOrientation: () -> Unit,
     onSelectSubtitle: (Int) -> Unit,
     onSelectAudio: (Int) -> Unit,
+    onSelectChapter: (Long) -> Unit,
     onSubDelayAdjust: (Double) -> Unit,
     onAudioDelayAdjust: (Double) -> Unit,
     onToggleHwDec: () -> Unit,
@@ -98,11 +108,12 @@ fun PlayerControls(
 
     Box(modifier = modifier.fillMaxSize()) {
 
-        if (state.currentSubtitleText.isNotBlank()) {
+        // Subtitle overlay: Only visible when subtitles are NOT disabled (-1)
+        if (state.selectedSubtitleTrackId != -1 && state.currentSubtitleText.isNotBlank()) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = if (isHudVisible) 95.dp else 24.dp)
+                    .padding(bottom = if (isHudVisible || state.slideSeekState.isActive) 100.dp else 24.dp)
                     .background(Color(0xCC000000), RoundedCornerShape(6.dp))
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
@@ -116,7 +127,8 @@ fun PlayerControls(
             }
         }
 
-        if (gestureState.isVisible && !isHudVisible && activeMenu == null) {
+        // Gesture Overlay (Volume & Brightness)
+        if (gestureState.isVisible && !isHudVisible && activeMenu == null && !state.slideSeekState.isActive) {
             val gestureAlignment = when {
                 !isLandscape -> Alignment.TopCenter
                 gestureState.iconType == GestureIconType.BRIGHTNESS -> Alignment.CenterEnd
@@ -125,9 +137,9 @@ fun PlayerControls(
             }
 
             val gesturePadding = when {
-                !isLandscape -> Modifier.padding(top = 70.dp)
-                gestureState.iconType == GestureIconType.BRIGHTNESS -> Modifier.padding(end = 36.dp)
-                gestureState.iconType == GestureIconType.VOLUME -> Modifier.padding(start = 36.dp)
+                !isLandscape -> Modifier.padding(top = 56.dp)
+                gestureState.iconType == GestureIconType.BRIGHTNESS -> Modifier.padding(end = 24.dp)
+                gestureState.iconType == GestureIconType.VOLUME -> Modifier.padding(start = 24.dp)
                 else -> Modifier
             }
 
@@ -166,6 +178,7 @@ fun PlayerControls(
             }
         }
 
+        // Locked state
         if (state.isControlsLocked) {
             if (isHudVisible) {
                 IconButton(
@@ -187,133 +200,183 @@ fun PlayerControls(
             return@Box
         }
 
-        if (isHudVisible && activeMenu == null) {
+        // Slide-to-Seek Real-time Floating Overlay & Timeline Thumb
+        if (state.slideSeekState.isActive) {
+            SlideSeekFloatingOverlay(
+                slideState = state.slideSeekState,
+                durationMs = state.durationMs,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // Normal HUD Controls
+        if (isHudVisible && activeMenu == null && !state.slideSeekState.isActive) {
+
+            // Top Bar with soft shadow gradient
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
-                    .background(Color.Transparent)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0x99000000),
+                                Color(0x44000000),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Back button: simple '<' without tail
                 IconButton(
                     onClick = onBack,
-                    modifier = Modifier.size(40.dp).testTag("player_back_button")
+                    modifier = Modifier.size(38.dp).testTag("player_back_button")
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                         contentDescription = "Back",
-                        tint = Color.White
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
 
-                Text(
-                    text = title,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                // Title: Up to 2 lines in horizontal mode, dull color on 2nd line
+                Column(
                     modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 8.dp)
+                        .weight(1f, fill = false)
+                        .widthIn(max = if (isLandscape) 360.dp else 220.dp)
+                        .padding(horizontal = 6.dp)
+                ) {
+                    val splitTitle = title.split(" - ", " / ", " | ")
+                    if (splitTitle.size > 1 && isLandscape) {
+                        Text(
+                            text = splitTitle[0].trim(),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = splitTitle.drop(1).joinToString(" - ").trim(),
+                            color = Color(0x99FFFFFF),
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        Text(
+                            text = title,
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = if (isLandscape) 2 else 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // HW / SW Decoder text (No box, plain text)
+                Text(
+                    text = if (state.hwDecMode == HwDecMode.AUTO && !state.hwDecFailed) "HW" else "SW",
+                    color = if (state.hwDecFailed) Color(0x66FFFFFF) else Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable(enabled = !state.hwDecFailed) { onToggleHwDec() }
+                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                        .testTag("hw_sw_decoder_button")
                 )
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .border(
-                            width = 1.dp,
-                            color = if (state.hwDecFailed) Color(0x66FFFFFF) else Color(0xBBFFFFFF),
-                            shape = RoundedCornerShape(4.dp)
-                        )
-                        .clickable(enabled = !state.hwDecFailed) {
-                            onToggleHwDec()
-                        }
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                        .testTag("hw_sw_decoder_button")
-                ) {
-                    Text(
-                        text = if (state.hwDecMode == HwDecMode.AUTO && !state.hwDecFailed) "HW" else "SW",
-                        color = if (state.hwDecFailed) Color(0x88FFFFFF) else Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                Spacer(modifier = Modifier.width(4.dp))
 
-                Spacer(modifier = Modifier.width(6.dp))
-
+                // Audio Track Menu Button
                 IconButton(
                     onClick = { activeMenu = "audio" },
-                    modifier = Modifier.size(38.dp).testTag("audio_menu_button")
+                    modifier = Modifier.size(36.dp).testTag("audio_menu_button")
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = "Audio Track",
                         tint = Color.White,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(21.dp)
                     )
                 }
 
+                // Subtitle Menu Button
                 IconButton(
                     onClick = { activeMenu = "subtitle" },
-                    modifier = Modifier.size(38.dp).testTag("subtitle_menu_button")
+                    modifier = Modifier.size(36.dp).testTag("subtitle_menu_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Subtitles,
                         contentDescription = "Subtitle Track",
                         tint = Color.White,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(21.dp)
                     )
                 }
 
-                IconButton(
-                    onClick = { activeMenu = "aspect" },
-                    modifier = Modifier.size(38.dp).testTag("aspect_ratio_button")
+                // Chapter Menu Button
+                if (state.chapters.isNotEmpty()) {
+                    IconButton(
+                        onClick = { activeMenu = "chapter" },
+                        modifier = Modifier.size(36.dp).testTag("chapter_menu_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FormatListBulleted,
+                            contentDescription = "Chapters",
+                            tint = Color.White,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
+                }
+
+                // Aspect Ratio Button: Single click cycles, Hold 1 sec opens menu
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .combinedClickable(
+                            onClick = { onCycleAspectRatio() },
+                            onLongClick = { activeMenu = "aspect" }
+                        )
+                        .testTag("aspect_ratio_button"),
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.AspectRatio,
                         contentDescription = "Aspect Ratio",
                         tint = Color.White,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(21.dp)
                     )
                 }
 
-                IconButton(
-                    onClick = { activeMenu = "more" },
-                    modifier = Modifier.size(38.dp).testTag("more_options_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More Options",
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-
+                // Lock Controls Button
                 IconButton(
                     onClick = onToggleLock,
-                    modifier = Modifier.size(38.dp).testTag("lock_button")
+                    modifier = Modifier.size(36.dp).testTag("lock_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.LockOpen,
                         contentDescription = "Lock Controls",
                         tint = Color.White,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
 
+            // Center Play / Pause button (No dark shadow circle behind it)
             Box(
                 modifier = Modifier.align(Alignment.Center),
                 contentAlignment = Alignment.Center
             ) {
                 IconButton(
                     onClick = onTogglePlayPause,
-                    modifier = Modifier
-                        .size(62.dp)
-                        .background(Color(0x77000000), CircleShape)
-                        .testTag("play_pause_button")
+                    modifier = Modifier.size(60.dp).testTag("play_pause_button")
                 ) {
                     Icon(
                         imageVector = if (state.status == PlaybackStatus.PLAYING) {
@@ -323,17 +386,26 @@ fun PlayerControls(
                         },
                         contentDescription = "Play or Pause",
                         tint = Color.White,
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier.size(46.dp)
                     )
                 }
             }
 
+            // Bottom Bar with soft shadow gradient
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
-                    .background(Color.Transparent)
-                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color(0x44000000),
+                                Color(0x99000000)
+                            )
+                        )
+                    )
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
                 var isScrubbingLocal by remember { mutableStateOf(false) }
                 var scrubPosition by remember { mutableStateOf(0f) }
@@ -356,33 +428,20 @@ fun PlayerControls(
                         fontWeight = FontWeight.Medium
                     )
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { activeMenu = "speed" }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                .testTag("speed_button")
-                        ) {
-                            Text(
-                                text = "${state.speed}x",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        IconButton(
-                            onClick = onToggleOrientation,
-                            modifier = Modifier.size(36.dp).testTag("orientation_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ScreenRotation,
-                                contentDescription = "Rotate Screen",
-                                tint = Color.White,
-                                modifier = Modifier.size(19.dp)
-                            )
-                        }
+                    // Speed button on the right
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { activeMenu = "speed" }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .testTag("speed_button")
+                    ) {
+                        Text(
+                            text = "${state.speed}x",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
 
@@ -402,7 +461,7 @@ fun PlayerControls(
                     colors = SliderDefaults.colors(
                         thumbColor = Color(0xFF2979FF),
                         activeTrackColor = Color(0xFF2979FF),
-                        inactiveTrackColor = Color(0x66FFFFFF)
+                        inactiveTrackColor = Color(0x55FFFFFF)
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -412,12 +471,16 @@ fun PlayerControls(
             }
         }
 
+        // Side Menus with soft gradient shadow background, no black scrim on video, no click-through
         if (activeMenu != null) {
+            // Transparent backdrop: clicking outside closes the menu, doesn't darken the video
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x66000000))
-                    .clickable { activeMenu = null }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { activeMenu = null }
             )
 
             val menuModifier = if (isLandscape) {
@@ -425,52 +488,190 @@ fun PlayerControls(
                     .width(360.dp)
                     .fillMaxHeight()
                     .align(Alignment.CenterEnd)
-                    .background(Color(0xF2101216))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color(0x5508090C),
+                                Color(0xDD08090C),
+                                Color(0xFA08090C)
+                            )
+                        )
+                    )
             } else {
                 Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .background(
-                        Color(0xF2101216),
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color(0x5508090C),
+                                Color(0xEE08090C),
+                                Color(0xFA08090C)
+                            )
+                        ),
                         RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
                     )
             }
 
+            // Consumes touches so underlying video / player is never clicked accidentally
             Box(
                 modifier = menuModifier
-                    .clickable(enabled = false) {}
+                    .pointerInput(Unit) {
+                        detectTapGestures { }
+                    }
                     .testTag("side_menu_panel")
             ) {
                 when (activeMenu) {
                     "subtitle" -> SubtitleSideMenu(
                         state = state,
-                        onClose = { activeMenu = null },
                         onSelectSubtitle = onSelectSubtitle,
                         onSubDelayAdjust = onSubDelayAdjust,
                         onPickSubtitle = onPickSubtitle
                     )
                     "audio" -> AudioSideMenu(
                         state = state,
-                        onClose = { activeMenu = null },
                         onSelectAudio = onSelectAudio,
                         onAudioDelayAdjust = onAudioDelayAdjust,
                         onPickAudio = onPickAudio
                     )
                     "aspect" -> AspectRatioSideMenu(
                         currentMode = state.aspectRatioMode,
-                        onClose = { activeMenu = null },
                         onSelectAspectRatio = onSelectAspectRatio
                     )
                     "speed" -> SpeedSideMenu(
                         currentSpeed = state.speed,
-                        onClose = { activeMenu = null },
                         onSetSpeed = onSetSpeed
                     )
-                    "more" -> MoreOptionsSideMenu(
-                        state = state,
-                        onClose = { activeMenu = null },
-                        onOpenMenu = { menu -> activeMenu = menu },
-                        onToggleHwDec = onToggleHwDec
+                    "chapter" -> ChapterSideMenu(
+                        chapters = state.chapters,
+                        currentPositionMs = state.positionMs,
+                        onSelectChapter = { timeMs ->
+                            onSelectChapter(timeMs)
+                            activeMenu = null
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SlideSeekFloatingOverlay(
+    slideState: SlideSeekState,
+    durationMs: Long,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val totalWidth = maxWidth
+        val fraction = slideState.seekFraction.coerceIn(0f, 1f)
+
+        // Floating 16:9 thumbnail and timestamp box above the thumb
+        val cardWidth = 130.dp
+        val cardHeight = 73.dp
+        val maxOffsetPx = (totalWidth - cardWidth)
+        val xOffset = (maxOffsetPx * fraction).coerceIn(0.dp, totalWidth - cardWidth)
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .offset { IntOffset(xOffset.roundToPx(), 0) }
+                .padding(bottom = 60.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // 16:9 Thumbnail Box in Crop mode
+            Box(
+                modifier = Modifier
+                    .size(width = cardWidth, height = cardHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xDD0D0E12))
+                    .border(1.5.dp, Color(0x66FFFFFF), RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (slideState.thumbnailBitmap != null) {
+                    Image(
+                        bitmap = slideState.thumbnailBitmap.asImageBitmap(),
+                        contentDescription = "Seek Frame Thumbnail",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Text(
+                        text = "Preview...",
+                        color = Color(0x99FFFFFF),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Duration text just below thumbnail box and above thumb
+            Box(
+                modifier = Modifier
+                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "${formatTimestamp(slideState.targetMs)} / ${formatTimestamp(durationMs)}",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // Timeline bar at the bottom with thumb circle moving in real time
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0x88000000))
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                // Background Track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color(0x55FFFFFF))
+                )
+
+                // Active Played Track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color(0xFF2979FF))
+                )
+
+                // YouTube style circular thumb moving with slide
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .align(Alignment.CenterStart),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2979FF))
+                            .border(2.dp, Color.White, CircleShape)
                     )
                 }
             }
@@ -492,52 +693,107 @@ fun VolumeGesturePill(
         1.0f to Color(0xFF1E88E5)
     )
 
-    Box(
-        modifier = Modifier
-            .background(Color(0xDD0D0E12), RoundedCornerShape(14.dp))
-            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(14.dp))
-            .padding(horizontal = 14.dp, vertical = 14.dp)
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+    if (!isLandscape) {
+        // Portrait mode: Horizontal pill at the top
+        Box(
+            modifier = Modifier
+                .background(Color(0xDD0D0E12), RoundedCornerShape(20.dp))
+                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
+                .padding(horizontal = 14.dp, vertical = 8.dp)
         ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                contentDescription = null,
-                tint = if (isBoost) Color(0xFFFF5722) else Color(0xFF2979FF),
-                modifier = Modifier.size(24.dp)
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Box(
-                modifier = Modifier
-                    .width(7.dp)
-                    .height(95.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0x44FFFFFF))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                val fillRatio = (level.toFloat() / 30f).coerceIn(0f, 1f)
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val barHeight = size.height * fillRatio
-                    drawRect(
-                        brush = barColorBrush,
-                        topLeft = Offset(0f, size.height - barHeight),
-                        size = Size(size.width, barHeight)
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                    contentDescription = null,
+                    tint = if (isBoost) Color(0xFFFF5722) else Color(0xFF2979FF),
+                    modifier = Modifier.size(20.dp)
+                )
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Box(
+                    modifier = Modifier
+                        .width(90.dp)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0x44FFFFFF))
+                ) {
+                    val fillRatio = (level.toFloat() / 30f).coerceIn(0f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fillRatio)
+                            .background(if (isBoost) Color(0xFFFF7043) else Color(0xFF2979FF))
                     )
                 }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Text(
+                    text = text,
+                    color = if (isBoost) Color(0xFFFFAB91) else Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(36.dp),
+                    textAlign = TextAlign.End
+                )
             }
+        }
+    } else {
+        // Landscape mode: Vertical pill on side with fixed compact width
+        Box(
+            modifier = Modifier
+                .width(44.dp)
+                .background(Color(0xDD0D0E12), RoundedCornerShape(12.dp))
+                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
+                .padding(vertical = 12.dp, horizontal = 4.dp)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                    contentDescription = null,
+                    tint = if (isBoost) Color(0xFFFF5722) else Color(0xFF2979FF),
+                    modifier = Modifier.size(20.dp)
+                )
 
-            Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = text,
-                color = if (isBoost) Color(0xFFFFAB91) else Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
+                Box(
+                    modifier = Modifier
+                        .width(5.dp)
+                        .height(85.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0x44FFFFFF))
+                ) {
+                    val fillRatio = (level.toFloat() / 30f).coerceIn(0f, 1f)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val barHeight = size.height * fillRatio
+                        drawRect(
+                            brush = barColorBrush,
+                            topLeft = Offset(0f, size.height - barHeight),
+                            size = Size(size.width, barHeight)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = text,
+                    color = if (isBoost) Color(0xFFFFAB91) else Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(38.dp),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
@@ -548,50 +804,104 @@ fun BrightnessGesturePill(
     progress: Float,
     isLandscape: Boolean
 ) {
-    Box(
-        modifier = Modifier
-            .background(Color(0xDD0D0E12), RoundedCornerShape(14.dp))
-            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(14.dp))
-            .padding(horizontal = 14.dp, vertical = 14.dp)
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+    if (!isLandscape) {
+        // Portrait mode: Horizontal pill at the top
+        Box(
+            modifier = Modifier
+                .background(Color(0xDD0D0E12), RoundedCornerShape(20.dp))
+                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(20.dp))
+                .padding(horizontal = 14.dp, vertical = 8.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.BrightnessMedium,
-                contentDescription = null,
-                tint = Color(0xFFFFD54F),
-                modifier = Modifier.size(24.dp)
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Box(
-                modifier = Modifier
-                    .width(7.dp)
-                    .height(95.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0x44FFFFFF))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
+                Icon(
+                    imageVector = Icons.Default.BrightnessMedium,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD54F),
+                    modifier = Modifier.size(20.dp)
+                )
+
+                Spacer(modifier = Modifier.width(10.dp))
+
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .fillMaxHeight(progress.coerceIn(0f, 1f))
-                        .align(Alignment.BottomCenter)
-                        .background(Color(0xFFFFD54F))
+                        .width(90.dp)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0x44FFFFFF))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(progress.coerceIn(0f, 1f))
+                            .background(Color(0xFFFFD54F))
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Text(
+                    text = text,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(36.dp),
+                    textAlign = TextAlign.End
                 )
             }
+        }
+    } else {
+        // Landscape mode: Vertical pill on side with fixed compact width
+        Box(
+            modifier = Modifier
+                .width(44.dp)
+                .background(Color(0xDD0D0E12), RoundedCornerShape(12.dp))
+                .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(12.dp))
+                .padding(vertical = 12.dp, horizontal = 4.dp)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.BrightnessMedium,
+                    contentDescription = null,
+                    tint = Color(0xFFFFD54F),
+                    modifier = Modifier.size(20.dp)
+                )
 
-            Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
-                text = text,
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
+                Box(
+                    modifier = Modifier
+                        .width(5.dp)
+                        .height(85.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0x44FFFFFF))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(progress.coerceIn(0f, 1f))
+                            .align(Alignment.BottomCenter)
+                            .background(Color(0xFFFFD54F))
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = text,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(38.dp),
+                    textAlign = TextAlign.Center,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
@@ -599,7 +909,6 @@ fun BrightnessGesturePill(
 @Composable
 fun SubtitleSideMenu(
     state: PlaybackState,
-    onClose: () -> Unit,
     onSelectSubtitle: (Int) -> Unit,
     onSubDelayAdjust: (Double) -> Unit,
     onPickSubtitle: () -> Unit
@@ -609,23 +918,14 @@ fun SubtitleSideMenu(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(18.dp)
+            .padding(20.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Subtitle",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-            }
-        }
+        Text(
+            text = "Subtitle",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
 
         Spacer(modifier = Modifier.height(14.dp))
 
@@ -700,7 +1000,7 @@ fun SubtitleSideMenu(
             if (subTracks.isEmpty()) {
                 item {
                     Text(
-                        text = "No internal subtitles detected in this video",
+                        text = "No internal subtitles found",
                         color = Color(0x99FFFFFF),
                         fontSize = 13.sp,
                         modifier = Modifier.padding(vertical = 12.dp)
@@ -750,11 +1050,13 @@ fun SubtitleSideMenu(
                 }
 
                 Text(
-                    text = String.format(Locale.US, "%.1fs", state.subDelaySec),
+                    text = String.format(Locale.US, "%+.1fs", state.subDelaySec),
                     color = Color.White,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 12.dp)
+                    modifier = Modifier
+                        .background(Color(0x44000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 )
 
                 IconButton(
@@ -773,7 +1075,6 @@ fun SubtitleSideMenu(
 @Composable
 fun AudioSideMenu(
     state: PlaybackState,
-    onClose: () -> Unit,
     onSelectAudio: (Int) -> Unit,
     onAudioDelayAdjust: (Double) -> Unit,
     onPickAudio: () -> Unit
@@ -783,27 +1084,52 @@ fun AudioSideMenu(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(18.dp)
+            .padding(20.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Audio Track",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-            }
-        }
+        Text(
+            text = "Audio Track",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
 
         Spacer(modifier = Modifier.height(14.dp))
 
         LazyColumn(modifier = Modifier.weight(1f)) {
+            item {
+                val isMuted = state.selectedAudioTrackId == -1
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectAudio(-1) }
+                        .padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .border(1.5.dp, if (isMuted) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape)
+                            .background(Color.Transparent, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isMuted) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(Color(0xFF2979FF), CircleShape)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Disable Audio",
+                        color = if (isMuted) Color(0xFF2979FF) else Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+
             items(audioTracks) { track ->
                 val isSelected = track.id == state.selectedAudioTrackId || track.isSelected
                 Row(
@@ -816,8 +1142,8 @@ fun AudioSideMenu(
                     Box(
                         modifier = Modifier
                             .size(20.dp)
-                            .background(Color.Transparent, CircleShape)
-                            .border(2.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape),
+                            .border(1.5.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape)
+                            .background(Color.Transparent, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         if (isSelected) {
@@ -840,36 +1166,13 @@ fun AudioSideMenu(
                 }
             }
 
-            item {
-                val isDisableSelected = state.selectedAudioTrackId == -1
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelectAudio(-1) }
-                        .padding(vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(20.dp)
-                            .background(Color.Transparent, CircleShape)
-                            .border(2.dp, if (isDisableSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isDisableSelected) {
-                            Box(
-                                modifier = Modifier
-                                    .size(10.dp)
-                                    .background(Color(0xFF2979FF), CircleShape)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
+            if (audioTracks.isEmpty()) {
+                item {
                     Text(
-                        text = "Disable Audio",
-                        color = if (isDisableSelected) Color(0xFF2979FF) else Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
+                        text = "No internal audio tracks found",
+                        color = Color(0x99FFFFFF),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 12.dp)
                     )
                 }
             }
@@ -916,11 +1219,13 @@ fun AudioSideMenu(
                 }
 
                 Text(
-                    text = String.format(Locale.US, "%.1fs", state.audioDelaySec),
+                    text = String.format(Locale.US, "%+.1fs", state.audioDelaySec),
                     color = Color.White,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 12.dp)
+                    modifier = Modifier
+                        .background(Color(0x44000000), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 )
 
                 IconButton(
@@ -939,59 +1244,37 @@ fun AudioSideMenu(
 @Composable
 fun AspectRatioSideMenu(
     currentMode: AspectRatioMode,
-    onClose: () -> Unit,
     onSelectAspectRatio: (AspectRatioMode) -> Unit
 ) {
-    val modes = listOf(
-        AspectRatioMode.FILL,
-        AspectRatioMode.FIT,
-        AspectRatioMode.CROP,
-        AspectRatioMode.RATIO_16_9,
-        AspectRatioMode.RATIO_1_1,
-        AspectRatioMode.RATIO_4_3
-    )
-
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(18.dp)
+            .padding(20.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Aspect Ratio",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-            }
-        }
+        Text(
+            text = "Aspect Ratio",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
 
         Spacer(modifier = Modifier.height(14.dp))
 
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(modes) { mode ->
+            items(AspectRatioMode.values()) { mode ->
                 val isSelected = mode == currentMode
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
-                            onSelectAspectRatio(mode)
-                            onClose()
-                        }
+                        .clickable { onSelectAspectRatio(mode) }
                         .padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
                             .size(20.dp)
-                            .background(Color.Transparent, CircleShape)
-                            .border(2.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape),
+                            .border(1.5.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape)
+                            .background(Color.Transparent, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         if (isSelected) {
@@ -1002,18 +1285,18 @@ fun AspectRatioSideMenu(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(14.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
                             text = mode.label,
                             color = if (isSelected) Color(0xFF2979FF) else Color.White,
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.SemiBold
                         )
                         Text(
                             text = mode.description,
-                            color = Color(0x99FFFFFF),
-                            fontSize = 11.sp
+                            color = Color(0x88FFFFFF),
+                            fontSize = 12.sp
                         )
                     }
                 }
@@ -1025,52 +1308,39 @@ fun AspectRatioSideMenu(
 @Composable
 fun SpeedSideMenu(
     currentSpeed: Float,
-    onClose: () -> Unit,
     onSetSpeed: (Float) -> Unit
 ) {
-    val speeds = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f)
+    val speeds = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(18.dp)
+            .padding(20.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Playback Speed",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-            }
-        }
+        Text(
+            text = "Playback Speed",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
 
         Spacer(modifier = Modifier.height(14.dp))
 
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(speeds) { sp ->
-                val isSelected = (currentSpeed - sp).let { it > -0.05f && it < 0.05f }
+            items(speeds) { spd ->
+                val isSelected = kotlin.math.abs(spd - currentSpeed) < 0.05f
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
-                            onSetSpeed(sp)
-                            onClose()
-                        }
-                        .padding(vertical = 11.dp),
+                        .clickable { onSetSpeed(spd) }
+                        .padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
                         modifier = Modifier
                             .size(20.dp)
-                            .background(Color.Transparent, CircleShape)
-                            .border(2.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape),
+                            .border(1.5.dp, if (isSelected) Color(0xFF2979FF) else Color(0x88FFFFFF), CircleShape)
+                            .background(Color.Transparent, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         if (isSelected) {
@@ -1081,9 +1351,9 @@ fun SpeedSideMenu(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(14.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "${sp}x",
+                        text = if (spd == 1.0f) "1.0x (Normal)" else "${spd}x",
                         color = if (isSelected) Color(0xFF2979FF) else Color.White,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium
@@ -1095,127 +1365,87 @@ fun SpeedSideMenu(
 }
 
 @Composable
-fun MoreOptionsSideMenu(
-    state: PlaybackState,
-    onClose: () -> Unit,
-    onOpenMenu: (String) -> Unit,
-    onToggleHwDec: () -> Unit
+fun ChapterSideMenu(
+    chapters: List<ChapterItem>,
+    currentPositionMs: Long,
+    onSelectChapter: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(18.dp)
+            .padding(20.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Options",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+        Text(
+            text = "Chapters",
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        if (chapters.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "No chapters found in this video",
+                    color = Color(0x99FFFFFF),
+                    fontSize = 14.sp
+                )
+            }
+        } else {
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(chapters) { ch ->
+                    val isCurrent = currentPositionMs in ch.startMs..ch.endMs
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelectChapter(ch.startMs) }
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = ch.title,
+                                color = if (isCurrent) Color(0xFF2979FF) else Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${formatTimestamp(ch.startMs)} - ${formatTimestamp(ch.endMs)}",
+                                color = Color(0x88FFFFFF),
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        if (isCurrent) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Active Chapter",
+                                tint = Color(0xFF2979FF),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
-
-        Spacer(modifier = Modifier.height(18.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            RoundMenuButton(
-                icon = Icons.Default.AspectRatio,
-                label = "Aspect Ratio",
-                onClick = { onOpenMenu("aspect") }
-            )
-            RoundMenuButton(
-                icon = Icons.Default.Speed,
-                label = "${state.speed}x",
-                onClick = { onOpenMenu("speed") }
-            )
-            RoundMenuButton(
-                icon = Icons.Default.Tune,
-                label = if (state.hwDecMode == HwDecMode.AUTO && !state.hwDecFailed) "HW Decoder" else "SW Decoder",
-                onClick = onToggleHwDec
-            )
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            RoundMenuButton(
-                icon = Icons.AutoMirrored.Filled.VolumeUp,
-                label = "Audio",
-                onClick = { onOpenMenu("audio") }
-            )
-            RoundMenuButton(
-                icon = Icons.Default.Subtitles,
-                label = "Subtitle",
-                onClick = { onOpenMenu("subtitle") }
-            )
-            RoundMenuButton(
-                icon = Icons.Default.Sync,
-                label = "Sync Audio",
-                onClick = { onOpenMenu("audio") }
-            )
-        }
-    }
-}
-
-@Composable
-fun RoundMenuButton(
-    icon: ImageVector,
-    label: String,
-    onClick: () -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .width(86.dp)
-            .clickable { onClick() }
-            .padding(vertical = 6.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(52.dp)
-                .background(Color(0x33FFFFFF), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = Color.White,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = label,
-            color = Color.White,
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
 fun formatTimestamp(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0L)
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    return if (hours > 0) {
-        String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return if (h > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", h, m, s)
     } else {
-        String.format(Locale.US, "%02d:%02d", minutes, seconds)
+        String.format(Locale.US, "%02d:%02d", m, s)
     }
 }

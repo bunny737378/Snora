@@ -8,26 +8,30 @@ import android.view.Surface
 object MPVLib {
 
     init {
-        val ffmpegLibs = arrayOf(
+        val coreLibs = arrayOf(
+            "c++_shared",
             "avutil",
             "swresample",
             "avcodec",
             "avformat",
             "swscale",
             "avfilter",
-            "avdevice"
+            "avdevice",
+            "placebo"
         )
-        for (lib in ffmpegLibs) {
+        for (lib in coreLibs) {
             try {
                 System.loadLibrary(lib)
             } catch (t: Throwable) {
+                android.util.Log.w("MPVLib", "Preload $lib notice: ${t.message}")
             }
         }
-        val libs = arrayOf("snora", "player")
-        for (lib in libs) {
+        val mpvLibs = arrayOf("mpv", "snora", "player")
+        for (lib in mpvLibs) {
             try {
                 System.loadLibrary(lib)
             } catch (t: Throwable) {
+                android.util.Log.w("MPVLib", "Load $lib notice: ${t.message}")
             }
         }
     }

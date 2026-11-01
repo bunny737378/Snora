@@ -32,6 +32,12 @@ set_target_properties(avdevice PROPERTIES IMPORTED_LOCATION ${JNI_LIBS_DIR}/liba
 add_library(snora SHARED IMPORTED)
 set_target_properties(snora PROPERTIES IMPORTED_LOCATION ${JNI_LIBS_DIR}/libsnora.so)
 
+add_library(mpv SHARED IMPORTED)
+set_target_properties(mpv PROPERTIES IMPORTED_LOCATION ${JNI_LIBS_DIR}/libmpv.so)
+
+add_library(placebo SHARED IMPORTED)
+set_target_properties(placebo PROPERTIES IMPORTED_LOCATION ${JNI_LIBS_DIR}/libplacebo.so)
+
 add_library(player SHARED
     main.cpp
     render.cpp
@@ -43,7 +49,8 @@ add_library(player SHARED
 )
 
 target_link_libraries(player
-    snora
+    mpv
+    placebo
     avformat
     avcodec
     avutil

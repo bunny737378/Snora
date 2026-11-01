@@ -84,9 +84,38 @@ fun PlayerView(
             }
             .pointerInput(playbackState.isControlsLocked) {
                 if (!playbackState.isControlsLocked) {
+                    var dragMode = 0 // 0: None, 1: Horizontal Slide Seek, 2: Vertical Gesture
                     detectDragGestures(
+                        onDragStart = {
+                            dragMode = 0
+                        },
+                        onDragEnd = {
+                            if (dragMode == 1) {
+                                controller.onSlideSeekEnd()
+                            }
+                            dragMode = 0
+                        },
+                        onDragCancel = {
+                            if (dragMode == 1) {
+                                controller.onSlideSeekEnd()
+                            }
+                            dragMode = 0
+                        },
                         onDrag = { change, dragAmount ->
-                            if (abs(dragAmount.y) > abs(dragAmount.x) * 1.2f) {
+                            if (dragMode == 0) {
+                                if (abs(dragAmount.x) > abs(dragAmount.y) * 1.1f && abs(dragAmount.x) > 6f) {
+                                    dragMode = 1
+                                    controller.onSlideSeekStart()
+                                } else if (abs(dragAmount.y) > abs(dragAmount.x) * 1.1f && abs(dragAmount.y) > 6f) {
+                                    dragMode = 2
+                                }
+                            }
+
+                            if (dragMode == 1) {
+                                change.consume()
+                                val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                controller.onSlideSeek(fraction)
+                            } else if (dragMode == 2) {
                                 change.consume()
                                 val isLeftHalf = change.position.x < size.width / 2
                                 val deltaPercent = -dragAmount.y / (size.height * 0.75f)
@@ -144,10 +173,11 @@ fun PlayerView(
             onSeekRelative = { deltaSec -> controller.player.seekRelative(deltaSec) },
             onSetSpeed = { speed -> controller.player.setSpeed(speed) },
             onSelectAspectRatio = { mode -> controller.player.videoRenderer.setAspectRatioMode(mode) },
+            onCycleAspectRatio = { controller.player.videoRenderer.cycleAspectRatioMode() },
             onToggleLock = { controller.toggleLock() },
-            onToggleOrientation = { controller.toggleOrientation(activity) },
             onSelectSubtitle = { trackId -> controller.player.subtitleManager.selectSubtitleTrack(trackId) },
             onSelectAudio = { trackId -> controller.player.audioManager.selectAudioTrack(trackId) },
+            onSelectChapter = { timeMs -> controller.player.seekTo(timeMs) },
             onSubDelayAdjust = { delta -> controller.player.subtitleManager.adjustSubtitleDelay(delta) },
             onAudioDelayAdjust = { delta -> controller.player.audioManager.adjustAudioDelay(delta) },
             onToggleHwDec = { controller.player.videoRenderer.toggleHwDec() },

@@ -1,5 +1,7 @@
 package arc.snora.player
 
+import android.graphics.Bitmap
+
 enum class PlaybackStatus {
     IDLE,
     BUFFERING,
@@ -48,6 +50,13 @@ data class VideoInfo(
     val hwdecActive: String = "HW"
 )
 
+data class SlideSeekState(
+    val isActive: Boolean = false,
+    val targetMs: Long = 0L,
+    val seekFraction: Float = 0f,
+    val thumbnailBitmap: Bitmap? = null
+)
+
 data class PlaybackState(
     val status: PlaybackStatus = PlaybackStatus.IDLE,
     val positionMs: Long = 0L,
@@ -60,6 +69,7 @@ data class PlaybackState(
     val subScale: Float = 1.0f,
     val isControlsLocked: Boolean = false,
     val isScrubbing: Boolean = false,
+    val slideSeekState: SlideSeekState = SlideSeekState(),
     val aspectRatioMode: AspectRatioMode = AspectRatioMode.FIT,
     val hwDecMode: HwDecMode = HwDecMode.AUTO,
     val hwDecFailed: Boolean = false,
