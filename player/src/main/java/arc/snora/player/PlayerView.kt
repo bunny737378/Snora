@@ -183,7 +183,8 @@ fun PlayerView(
             onToggleHwDec = { controller.player.videoRenderer.toggleHwDec() },
             onScrubbingChange = { isScrubbing -> controller.setScrubbing(isScrubbing) },
             onPickSubtitle = { subtitlePicker.launch(arrayOf("*/*")) },
-            onPickAudio = { audioPicker.launch(arrayOf("audio/*", "*/*")) }
+            onPickAudio = { audioPicker.launch(arrayOf("audio/*", "*/*")) },
+            onToggleOrientation = { controller.toggleOrientation(activity) }
         )
     }
 }

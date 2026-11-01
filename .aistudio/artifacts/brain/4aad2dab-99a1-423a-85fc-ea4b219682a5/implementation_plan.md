@@ -103,3 +103,12 @@ Upgrading the SNORA Android media player JNI engine to a high-performance, GPU-a
    - **Subtitle Overlay**: Decode `AVSubtitle` rectangles and render text/bitmap texture on GLES overlay quad.
 3. **`SnoraNativeEngine.kt`**: Expose `setSpeed`, `setAspectRatioMode`, `setZoom`, `setHardwareAccelerationEnabled`, `seekTo`, `setAudioTrack`, `setSubtitleTrack`.
 4. **`SnoraPlayer.kt`**: Connect Compose state flows to native engine methods.
+
+
+---
+
+## 5. Recent Refinements & Fullscreen Button Restoration
+- **Fullscreen Enter/Exit**: Reintroduced the fullscreen toggle button on the bottom bar next to the speed chip (`Icons.Default.Fullscreen` in portrait, `Icons.Default.FullscreenExit` in landscape).
+- **Wiring**: Connected to `controller.toggleOrientation(activity)` via `onToggleOrientation` callback in `PlayerView.kt`.
+- **Integrity**: All existing features (soft shadows, slide-to-seek, aspect ratio gestures, chapter menu, unboxed HW/SW, clean subtitle disable, horizontal gesture pill) remain fully intact.
+- **Compilation**: Verified and build succeeded.

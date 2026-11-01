@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for upgrading SNORA JNI Player engine to GLES2 YUV rendering, MediaCodec HW acceleration, pitch-preserving audio speed controls, native subtitle rendering, and aspect ratio transformations.",
-  "updatedAt":  "2026-10-30T16:49:32.946560271Z",
+  "summary":  "Restored the fullscreen toggle button in PlayerControls next to the playback speed chip, wired to toggle orientation between portrait and landscape. All previous design, gesture, and decoder improvements preserved. App successfully compiled.",
+  "updatedAt":  "2026-11-01T14:49:38.962559048Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

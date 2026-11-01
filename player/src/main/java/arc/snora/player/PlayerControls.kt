@@ -39,6 +39,8 @@ import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
@@ -100,6 +102,7 @@ fun PlayerControls(
     onScrubbingChange: (Boolean) -> Unit,
     onPickSubtitle: () -> Unit,
     onPickAudio: () -> Unit,
+    onToggleOrientation: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var activeMenu by remember { mutableStateOf<String?>(null) }
@@ -428,20 +431,39 @@ fun PlayerControls(
                         fontWeight = FontWeight.Medium
                     )
 
-                    // Speed button on the right
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .clickable { activeMenu = "speed" }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                            .testTag("speed_button")
-                    ) {
-                        Text(
-                            text = "${state.speed}x",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Speed button
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { activeMenu = "speed" }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("speed_button")
+                        ) {
+                            Text(
+                                text = "${state.speed}x",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        // Fullscreen enter/exit toggle button
+                        IconButton(
+                            onClick = onToggleOrientation,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .testTag("fullscreen_toggle_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isLandscape) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = if (isLandscape) "Exit Fullscreen" else "Enter Fullscreen",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 }
 
