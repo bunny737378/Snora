@@ -38,10 +38,20 @@ object SnoraNativeEngine {
         }
 
         try {
-            System.loadLibrary("snora_player")
+            System.loadLibrary("snora")
+        } catch (t: Throwable) {
+        }
+
+        try {
+            System.loadLibrary("player")
             isLoaded = true
         } catch (t: Throwable) {
-            isLoaded = false
+            try {
+                System.loadLibrary("snora_player")
+                isLoaded = true
+            } catch (t2: Throwable) {
+                isLoaded = false
+            }
         }
     }
 
