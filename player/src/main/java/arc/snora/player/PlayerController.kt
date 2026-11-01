@@ -23,6 +23,12 @@ data class GestureOverlayState(
     val isBoost: Boolean = false
 )
 
+data class DoubleTapSeekState(
+    val isVisible: Boolean = false,
+    val isForward: Boolean = true,
+    val seconds: Int = 10
+)
+
 enum class GestureIconType {
     NONE,
     VOLUME,
@@ -42,8 +48,12 @@ class PlayerController(
     private val _gestureState = MutableStateFlow(GestureOverlayState())
     val gestureState: StateFlow<GestureOverlayState> = _gestureState.asStateFlow()
 
+    private val _doubleTapSeekState = MutableStateFlow(DoubleTapSeekState())
+    val doubleTapSeekState: StateFlow<DoubleTapSeekState> = _doubleTapSeekState.asStateFlow()
+
     private var autoHideJob: Job? = null
     private var gestureHideJob: Job? = null
+    private var doubleTapJob: Job? = null
     private var isScrubbing: Boolean = false
 
     private var accumulatedVolumeDelta: Float = 0f
@@ -109,15 +119,26 @@ class PlayerController(
     }
 
     fun onDoubleTapSeek(isForward: Boolean) {
+        val current = _doubleTapSeekState.value
+        val newSeconds = if (current.isVisible && current.isForward == isForward) {
+            current.seconds + 10
+        } else {
+            10
+        }
         val delta = if (isForward) 10.0 else -10.0
         player.seekRelative(delta)
-        showGestureOverlay(
-            type = GestureIconType.SEEK,
-            text = if (isForward) "+10s" else "-10s",
-            progress = 0.5f,
-            volLevel = 0,
-            boost = false
+
+        _doubleTapSeekState.value = DoubleTapSeekState(
+            isVisible = true,
+            isForward = isForward,
+            seconds = newSeconds
         )
+
+        doubleTapJob?.cancel()
+        doubleTapJob = scope.launch {
+            delay(900)
+            _doubleTapSeekState.value = _doubleTapSeekState.value.copy(isVisible = false)
+        }
     }
 
     fun adjustVolumeGesture(deltaPercent: Float) {
@@ -243,8 +264,8 @@ class PlayerController(
     }
 
     private var wasPlayingBeforeSlide: Boolean = false
-    private var thumbnailJob: Job? = null
-    private var lastLoadedBitmap: android.graphics.Bitmap? = null
+    private var isThumbnailLoading: Boolean = false
+    private var lastThumbnailRequestMs: Long = -1L
 
     fun onSlideSeekStart() {
         dismissGestureOverlayImmediately()
@@ -254,52 +275,70 @@ class PlayerController(
         if (wasPlayingBeforeSlide) {
             player.pause()
         }
-        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val pos = player.playbackState.value.positionMs
+        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val initialFraction = (pos.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+        lastThumbnailRequestMs = -1L
         player.updateState {
             it.copy(
                 slideSeekState = SlideSeekState(
                     isActive = true,
                     targetMs = pos,
                     seekFraction = initialFraction,
-                    thumbnailBitmap = lastLoadedBitmap
+                    thumbnailBitmap = null
                 )
             )
         }
+        requestThumbnail(pos)
     }
 
-    fun onSlideSeek(fraction: Float) {
+    fun onSlideSeek(targetMs: Long, fraction: Float) {
         val clampedFraction = fraction.coerceIn(0f, 1f)
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
-        val targetMs = (clampedFraction * duration).toLong().coerceIn(0L, duration)
+        val clampedTargetMs = targetMs.coerceIn(0L, duration)
 
         player.updateState {
             it.copy(
                 slideSeekState = it.slideSeekState.copy(
                     isActive = true,
-                    targetMs = targetMs,
+                    targetMs = clampedTargetMs,
                     seekFraction = clampedFraction
                 )
             )
         }
 
-        thumbnailJob?.cancel()
-        thumbnailJob = scope.launch {
-            val bmp = player.loadThumbnailFrame(targetMs)
-            if (bmp != null) {
-                lastLoadedBitmap = bmp
-                player.updateState {
-                    if (it.slideSeekState.isActive) {
-                        it.copy(slideSeekState = it.slideSeekState.copy(thumbnailBitmap = bmp))
-                    } else it
+        if (kotlin.math.abs(clampedTargetMs - lastThumbnailRequestMs) > 800L) {
+            requestThumbnail(clampedTargetMs)
+        }
+    }
+
+    private fun requestThumbnail(targetMs: Long) {
+        if (isThumbnailLoading) return
+        lastThumbnailRequestMs = targetMs
+        isThumbnailLoading = true
+        scope.launch {
+            try {
+                val bmp = player.loadThumbnailFrame(targetMs)
+                if (bmp != null) {
+                    player.updateState {
+                        if (it.slideSeekState.isActive) {
+                            it.copy(slideSeekState = it.slideSeekState.copy(thumbnailBitmap = bmp))
+                        } else it
+                    }
+                }
+            } finally {
+                isThumbnailLoading = false
+                val currentTarget = player.playbackState.value.slideSeekState.targetMs
+                if (player.playbackState.value.slideSeekState.isActive &&
+                    kotlin.math.abs(currentTarget - lastThumbnailRequestMs) > 800L
+                ) {
+                    requestThumbnail(currentTarget)
                 }
             }
         }
     }
 
     fun onSlideSeekEnd() {
-        thumbnailJob?.cancel()
         val targetMs = player.playbackState.value.slideSeekState.targetMs
         player.seekTo(targetMs)
         player.updateState {

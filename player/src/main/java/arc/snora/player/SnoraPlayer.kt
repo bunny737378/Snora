@@ -340,35 +340,38 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         try {
             when (mode) {
                 AspectRatioMode.FIT -> {
-                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyString("keepaspect", "yes")
                     MPVLib.setPropertyDouble("panscan", 0.0)
                     MPVLib.setPropertyString("video-aspect-override", "-1")
                 }
                 AspectRatioMode.CROP -> {
-                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyString("keepaspect", "yes")
                     MPVLib.setPropertyDouble("panscan", 1.0)
                     MPVLib.setPropertyString("video-aspect-override", "-1")
                 }
                 AspectRatioMode.FILL -> {
-                    MPVLib.setOptionString("keepaspect", "no")
+                    MPVLib.setPropertyString("keepaspect", "no")
                     MPVLib.setPropertyDouble("panscan", 0.0)
                     MPVLib.setPropertyString("video-aspect-override", "-1")
                 }
                 AspectRatioMode.RATIO_16_9 -> {
-                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyString("keepaspect", "yes")
                     MPVLib.setPropertyDouble("panscan", 0.0)
                     MPVLib.setPropertyString("video-aspect-override", "16:9")
                 }
                 AspectRatioMode.RATIO_1_1 -> {
-                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyString("keepaspect", "yes")
                     MPVLib.setPropertyDouble("panscan", 0.0)
                     MPVLib.setPropertyString("video-aspect-override", "1:1")
                 }
                 AspectRatioMode.RATIO_4_3 -> {
-                    MPVLib.setOptionString("keepaspect", "yes")
+                    MPVLib.setPropertyString("keepaspect", "yes")
                     MPVLib.setPropertyDouble("panscan", 0.0)
                     MPVLib.setPropertyString("video-aspect-override", "4:3")
                 }
+            }
+            if (_playbackState.value.status != PlaybackStatus.PLAYING) {
+                MPVLib.command(arrayOf("seek", "0", "relative+exact"))
             }
         } catch (t: Throwable) {
         }

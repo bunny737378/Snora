@@ -18,12 +18,12 @@ enum class TrackType {
 }
 
 enum class AspectRatioMode(val label: String, val description: String) {
-    FIT("Fit", "Video ko bina crop kiye poora dikhata hai"),
-    CROP("Crop", "Video ke extra parts ko kaatkar required size mein dikhata hai"),
-    FILL("Fill", "Video ko poori screen par dikhata hai"),
-    RATIO_16_9("16:9", "16:9 widescreen aspect ratio"),
-    RATIO_1_1("1:1", "1:1 square aspect ratio"),
-    RATIO_4_3("4:3", "4:3 standard aspect ratio")
+    FIT("Original", ""),
+    CROP("Crop", ""),
+    FILL("Fill", ""),
+    RATIO_16_9("16:9", ""),
+    RATIO_1_1("1:1", ""),
+    RATIO_4_3("4:3", "")
 }
 
 enum class HwDecMode(val value: String, val label: String) {
