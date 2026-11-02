@@ -92,14 +92,14 @@ fun PlayerView(
             .background(Color.Black)
             .testTag("snora_player_container")
             .pointerInput(playbackState.isControlsLocked, activeMenu) {
-                if (!playbackState.isControlsLocked && activeMenu == null) {
+                if (activeMenu == null) {
                     detectTapGestures(
-                        onTap = {
-                            controller.onScreenTap()
-                        },
+                        onTap = { controller.onScreenTap() },
                         onDoubleTap = { offset ->
-                            val isRightHalf = offset.x > size.width / 2
-                            controller.onDoubleTapSeek(isRightHalf)
+                            if (!playbackState.isControlsLocked) {
+                                val isRightHalf = offset.x > size.width / 2
+                                controller.onDoubleTapSeek(isRightHalf)
+                            }
                         }
                     )
                 }
@@ -142,7 +142,7 @@ fun PlayerView(
                             if (dragMode == 1) {
                                 change.consume()
                                 slideDragDistanceX += dragAmount.x
-                                val deltaMs = ((slideDragDistanceX / size.width.toFloat()) * totalDuration * 0.75f).toLong()
+                                val deltaMs = ((slideDragDistanceX / size.width.toFloat()) * 60_000f).toLong()
                                 val targetMs = (slideStartPosMs + deltaMs).coerceIn(0L, totalDuration)
                                 val fraction = (targetMs.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
                                 controller.onSlideSeek(targetMs, fraction)
@@ -222,6 +222,7 @@ fun PlayerView(
             onAudioDelayAdjust = { delta -> controller.player.audioManager.adjustAudioDelay(delta) },
             onToggleHwDec = { controller.player.videoRenderer.toggleHwDec() },
             onScrubbingChange = { isScrubbing -> controller.setScrubbing(isScrubbing) },
+            onPreviewSeek = { targetMs, fraction, active -> controller.onTimelinePreview(targetMs, fraction, active) },
             onPickSubtitle = { subtitlePicker.launch(arrayOf("*/*")) },
             onPickAudio = { audioPicker.launch(arrayOf("audio/*", "*/*")) },
             onToggleOrientation = { controller.toggleOrientation(activity) }

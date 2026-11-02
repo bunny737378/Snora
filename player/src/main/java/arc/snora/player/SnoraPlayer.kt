@@ -30,6 +30,8 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     private var isMpvInitialized: Boolean = false
     private var isMpvPlaying: Boolean = false
     private var voInUse: String = "gpu"
+    @Volatile private var isBuffering: Boolean = false
+    private var timelinePreparedForMs: Long = 0L
 
     private val systemAudioManager =
         context.getSystemService(Context.AUDIO_SERVICE) as? AndroidAudioManager
@@ -79,6 +81,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                 MPVLib.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NONE)
                 MPVLib.observeProperty("hwdec-current", MPVLib.MpvFormat.MPV_FORMAT_STRING)
                 MPVLib.observeProperty("pause", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+                MPVLib.observeProperty("paused-for-cache", MPVLib.MpvFormat.MPV_FORMAT_FLAG)
                 MPVLib.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 MPVLib.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
                 MPVLib.observeProperty("sub-text", MPVLib.MpvFormat.MPV_FORMAT_STRING)
@@ -139,8 +142,10 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             }
         }
 
+        isBuffering = true
+        timelinePreparedForMs = 0L
         _playbackState.value = _playbackState.value.copy(
-            status = PlaybackStatus.PLAYING,
+            status = PlaybackStatus.BUFFERING,
             positionMs = 0L,
             errorMessage = null
         )
@@ -149,6 +154,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             MPVLib.command(arrayOf("loadfile", pathOrUri))
             MPVLib.setPropertyBoolean("pause", false)
         } catch (t: Throwable) {
+            isBuffering = false
             _playbackState.value = _playbackState.value.copy(
                 status = PlaybackStatus.ERROR,
                 errorMessage = t.localizedMessage ?: "Failed to open video"
@@ -191,21 +197,31 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                     (trackType == TrackType.SUBTITLE && trackId == currentSid)
                 )
 
-                val displayTitle = when {
-                    title.isNotBlank() && lang != "und" -> "$title [$lang]"
-                    title.isNotBlank() -> title
-                    lang != "und" -> "${typeStr.replaceFirstChar { it.uppercase() }} Track $trackId ($lang)"
-                    else -> "${typeStr.replaceFirstChar { it.uppercase() }} Track $trackId"
-                }
-
                 trackList.add(
                     TrackItem(
                         id = trackId,
                         type = trackType,
-                        title = displayTitle,
+                        title = title.trim(),
                         lang = lang,
                         codec = codec.uppercase(),
                         isSelected = isSelected
+                    )
+                )
+            }
+
+            val languageCounts = trackList
+                .filter { it.type == TrackType.AUDIO || it.type == TrackType.SUBTITLE }
+                .groupingBy { it.type to LanguageNames.groupingKey(it.lang) }
+                .eachCount()
+            val namedTracks = trackList.map { track ->
+                if (track.type != TrackType.AUDIO && track.type != TrackType.SUBTITLE) return@map track
+                val label = if (track.type == TrackType.AUDIO) "Audio" else "Subtitle"
+                track.copy(
+                    title = LanguageNames.displayTrackTitle(
+                        title = track.title,
+                        lang = track.lang,
+                        multipleTracksForLanguage = (languageCounts[track.type to LanguageNames.groupingKey(track.lang)] ?: 0) > 1,
+                        fallback = "$label Track ${track.id}"
                     )
                 )
             }
@@ -224,7 +240,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             }
 
             _playbackState.value = _playbackState.value.copy(
-                tracks = trackList,
+                tracks = namedTracks,
                 chapters = chapterList,
                 selectedAudioTrackId = currentAid,
                 selectedSubtitleTrackId = currentSid
@@ -263,8 +279,13 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                         hwdecActive = if (isHwWorking) "HW ($hwdecCurrent)" else "SW"
                     )
 
+                    val effectiveDuration = if (durMs > 0) durMs else _playbackState.value.durationMs
+                    if (effectiveDuration > 0L && timelinePreparedForMs != effectiveDuration) {
+                        timelinePreparedForMs = effectiveDuration
+                        playerScope.launch { thumbnailLoader.prepareTimeline(effectiveDuration) }
+                    }
                     _playbackState.value = _playbackState.value.copy(
-                        durationMs = if (durMs > 0) durMs else _playbackState.value.durationMs,
+                        durationMs = effectiveDuration,
                         positionMs = posMs,
                         videoInfo = newInfo,
                         hwDecMode = hwMode,
@@ -272,6 +293,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                         status = when {
                             isPaused -> PlaybackStatus.PAUSED
                             durMs > 0 && posMs >= durMs -> PlaybackStatus.ENDED
+                            isBuffering -> PlaybackStatus.BUFFERING
                             else -> PlaybackStatus.PLAYING
                         }
                     )
@@ -547,7 +569,17 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     override fun eventProperty(property: String, value: Boolean) {
         if (property == "pause") {
             _playbackState.value = _playbackState.value.copy(
-                status = if (value) PlaybackStatus.PAUSED else PlaybackStatus.PLAYING
+                status = if (value) PlaybackStatus.PAUSED else if (isBuffering) PlaybackStatus.BUFFERING else PlaybackStatus.PLAYING
+            )
+        } else if (property == "paused-for-cache") {
+            isBuffering = value
+            val current = _playbackState.value
+            _playbackState.value = current.copy(
+                status = when {
+                    current.status == PlaybackStatus.PAUSED -> PlaybackStatus.PAUSED
+                    value -> PlaybackStatus.BUFFERING
+                    else -> PlaybackStatus.PLAYING
+                }
             )
         }
     }
@@ -568,10 +600,19 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     override fun eventProperty(property: String, value: Double) {}
 
     override fun event(eventId: Int) {
-        if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
+        if (eventId == MPVLib.MpvEvent.MPV_EVENT_START_FILE) {
+            isBuffering = true
+            _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.BUFFERING)
+        } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
+            isBuffering = false
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.ENDED)
-        } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
-            _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+        } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED ||
+            eventId == MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART
+        ) {
+            isBuffering = false
+            if (_playbackState.value.status == PlaybackStatus.BUFFERING) {
+                _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+            }
             refreshTracks()
         }
     }
@@ -579,6 +620,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     fun destroy() {
         progressJob?.cancel()
         isMpvPlaying = false
+        isBuffering = false
         try {
             thumbnailLoader.release()
             MPVLib.removeObserver(this)
