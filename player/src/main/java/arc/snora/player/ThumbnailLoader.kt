@@ -13,35 +13,45 @@ class ThumbnailLoader(private val context: Context) {
     private val cache = LruCache<Long, Bitmap>(30)
     @Volatile private var currentDataSource: String = ""
     private var retriever: MediaMetadataRetriever? = null
+    private var retrieverSource: String = ""
     @Volatile private var timelineFrames: List<Pair<Long, Bitmap>> = emptyList()
 
     fun setDataSource(source: String) {
-        synchronized(lock) {
-            if (source != currentDataSource) {
-                currentDataSource = source
-                cache.evictAll()
-                timelineFrames = emptyList()
-                try {
-                    retriever?.release()
-                } catch (t: Throwable) {
-                }
-                retriever = null
-            }
-        }
+        if (source == currentDataSource) return
+
+        // Only invalidate state on the caller (normally the main thread). Closing
+        // MediaMetadataRetriever can wait for an in-flight codec read, so stale
+        // retriever cleanup is deliberately deferred to ensureRetriever() on IO.
+        currentDataSource = source
+        cache.evictAll()
+        timelineFrames = emptyList()
     }
 
+    /** Must be called while holding [lock], from a background dispatcher. */
     private fun ensureRetriever(): MediaMetadataRetriever? {
-        if (retriever == null && currentDataSource.isNotEmpty()) {
+        val source = currentDataSource
+        if (retriever != null && retrieverSource != source) {
+            try {
+                retriever?.release()
+            } catch (t: Throwable) {
+            }
+            retriever = null
+            retrieverSource = ""
+        }
+
+        if (retriever == null && source.isNotEmpty()) {
             try {
                 val r = MediaMetadataRetriever()
-                if (currentDataSource.startsWith("content://")) {
-                    r.setDataSource(context, Uri.parse(currentDataSource))
+                if (source.startsWith("content://")) {
+                    r.setDataSource(context, Uri.parse(source))
                 } else {
-                    r.setDataSource(currentDataSource)
+                    r.setDataSource(source)
                 }
                 retriever = r
+                retrieverSource = source
             } catch (t: Throwable) {
                 retriever = null
+                retrieverSource = ""
             }
         }
         return retriever
@@ -134,6 +144,7 @@ class ThumbnailLoader(private val context: Context) {
             } catch (t: Throwable) {
             }
             retriever = null
+            retrieverSource = ""
             timelineFrames = emptyList()
             cache.evictAll()
         }

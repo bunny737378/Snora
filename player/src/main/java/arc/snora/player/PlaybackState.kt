@@ -57,6 +57,26 @@ data class SlideSeekState(
     val thumbnailBitmap: Bitmap? = null
 )
 
+data class SubtitleAppearance(
+    val horizontalPosition: Float = DEFAULT_HORIZONTAL_POSITION,
+    val verticalPosition: Float = DEFAULT_VERTICAL_POSITION,
+    val fontSizeSp: Float = DEFAULT_FONT_SIZE_SP
+) {
+    fun isDefault(): Boolean {
+        return kotlin.math.abs(horizontalPosition - DEFAULT_HORIZONTAL_POSITION) < 0.001f &&
+            kotlin.math.abs(verticalPosition - DEFAULT_VERTICAL_POSITION) < 0.001f &&
+            kotlin.math.abs(fontSizeSp - DEFAULT_FONT_SIZE_SP) < 0.01f
+    }
+
+    companion object {
+        const val DEFAULT_HORIZONTAL_POSITION = 0.5f
+        const val DEFAULT_VERTICAL_POSITION = 0.12f
+        const val DEFAULT_FONT_SIZE_SP = 17f
+        const val MIN_FONT_SIZE_SP = 10f
+        const val MAX_FONT_SIZE_SP = 24f
+    }
+}
+
 data class PlaybackState(
     val status: PlaybackStatus = PlaybackStatus.IDLE,
     val positionMs: Long = 0L,
@@ -77,6 +97,7 @@ data class PlaybackState(
     val tracks: List<TrackItem> = emptyList(),
     val chapters: List<ChapterItem> = emptyList(),
     val currentSubtitleText: String = "",
+    val subtitleAppearance: SubtitleAppearance? = null,
     val selectedAudioTrackId: Int = -1,
     val selectedSubtitleTrackId: Int = -1,
     val videoInfo: VideoInfo = VideoInfo(),

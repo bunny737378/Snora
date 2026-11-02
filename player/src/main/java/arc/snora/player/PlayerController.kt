@@ -312,19 +312,19 @@ class PlayerController(
         }
     }
 
-    private var wasPlayingBeforeSlide: Boolean = false
     private var isThumbnailLoading: Boolean = false
     private var lastThumbnailRequestMs: Long = -1L
+    private var slideSeekStartPositionMs: Long = 0L
+    private var hasValidSlideSeek: Boolean = false
 
     fun onSlideSeekStart() {
         dismissGestureOverlayImmediately()
         hideHud()
-        val currentStatus = player.playbackState.value.status
-        wasPlayingBeforeSlide = (currentStatus == PlaybackStatus.PLAYING)
-        if (wasPlayingBeforeSlide) {
-            player.pause()
-        }
+        // VLC keeps playback running and holds a forced preview time while the
+        // finger moves. Only one real seek is issued on release.
         val pos = player.playbackState.value.positionMs
+        slideSeekStartPositionMs = pos
+        hasValidSlideSeek = false
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val initialFraction = (pos.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
         lastThumbnailRequestMs = -1L
@@ -342,9 +342,11 @@ class PlayerController(
     }
 
     fun onSlideSeek(targetMs: Long, fraction: Float) {
+        val duration = player.playbackState.value.durationMs
+        if (duration <= 0L) return
         val clampedFraction = fraction.coerceIn(0f, 1f)
-        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val clampedTargetMs = targetMs.coerceIn(0L, duration)
+        hasValidSlideSeek = clampedTargetMs != slideSeekStartPositionMs
 
         player.updateState {
             it.copy(
@@ -388,13 +390,23 @@ class PlayerController(
     }
 
     fun onSlideSeekEnd() {
-        val targetMs = player.playbackState.value.slideSeekState.targetMs
-        player.seekTo(targetMs)
+        val state = player.playbackState.value
+        if (!state.slideSeekState.isActive) return
+
         player.updateState {
             it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
-        if (wasPlayingBeforeSlide) {
-            player.resume()
+        if (hasValidSlideSeek && state.durationMs > 0L) {
+            player.seekTo(state.slideSeekState.targetMs.coerceIn(0L, state.durationMs))
+        }
+        hasValidSlideSeek = false
+    }
+
+    fun onSlideSeekCancel() {
+        // An interrupted gesture must never fall through to an arbitrary seek.
+        hasValidSlideSeek = false
+        player.updateState {
+            it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
     }
 }

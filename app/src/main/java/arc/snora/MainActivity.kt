@@ -44,7 +44,10 @@ import arc.snora.player.HwDecMode
 import arc.snora.player.PlayerController
 import arc.snora.player.PlayerView
 import arc.snora.player.SnoraPlayer
+import arc.snora.player.SubtitleAppearance
 import arc.snora.settings.SettingsScreen
+import arc.snora.settings.SubtitleSettingsScreen
+import arc.snora.settings.SubtitleSettingsStore
 import arc.snora.ui.theme.SnoraTheme
 import kotlinx.coroutines.launch
 
@@ -98,6 +101,11 @@ fun MainContent(
     var currentDestination by remember { mutableStateOf(AppDestination.HOME) }
     var activeVideo by remember { mutableStateOf<VideoItem?>(null) }
     var activeTitle by remember { mutableStateOf("") }
+    var showSubtitleSettings by remember { mutableStateOf(false) }
+    val subtitleSettingsStore = remember(activity) { SubtitleSettingsStore(activity) }
+    var subtitleAppearance by remember {
+        mutableStateOf<SubtitleAppearance>(subtitleSettingsStore.load())
+    }
 
     var videos by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var folders by remember { mutableStateOf<List<FolderGroup>>(emptyList()) }
@@ -146,12 +154,18 @@ fun MainContent(
             activeTitle = title
             setFullscreen(true)
             val source = if (path.isNotBlank()) path else uriString
-            player.playMedia(source, 0L)
+            val customAppearance = subtitleAppearance.takeUnless { it.isDefault() }
+            if (customAppearance == null) {
+                // Let the player use its own defaults when nothing was customized.
+                player.playMedia(source, 0L)
+            } else {
+                player.playMedia(source, 0L, customAppearance)
+            }
         }
     }
 
     fun closePlayer() {
-        player.pause()
+        player.stopPlayback()
         setFullscreen(false)
         activeVideo = null
     }
@@ -199,6 +213,18 @@ fun MainContent(
                     closePlayer()
                 }
             }
+        )
+    } else if (showSubtitleSettings) {
+        BackHandler(enabled = true) {
+            showSubtitleSettings = false
+        }
+        SubtitleSettingsScreen(
+            appearance = subtitleAppearance,
+            onAppearanceChange = { appearance ->
+                subtitleAppearance = appearance
+                subtitleSettingsStore.save(appearance)
+            },
+            onBack = { showSubtitleSettings = false }
         )
     } else {
         Scaffold(
@@ -250,7 +276,8 @@ fun MainContent(
                             onHwDecChange = { mode ->
                                 currentHwDec = mode
                                 player.videoRenderer.setHwDecMode(mode)
-                            }
+                            },
+                            onSubtitleSettingsClick = { showSubtitleSettings = true }
                         )
                     }
                 }

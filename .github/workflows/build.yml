@@ -79,8 +79,8 @@ jobs:
       - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Test and Build Debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
 
       - name: Prepare Output APK
         run: |
