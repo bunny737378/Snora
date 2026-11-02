@@ -207,9 +207,10 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         currentSurface = surface
         try {
             ensureMpvCreated()
-            MPVLib.attachSurface(surface)
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", voInUse)
+            MPVLib.attachSurface(surface)
+            MPVLib.setPropertyString("vid", "auto")
 
             if (currentPathOrUri.isNotEmpty() && !isMpvPlaying) {
                 playMedia(currentPathOrUri, 0L)
@@ -228,8 +229,6 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     fun detachSurface() {
         currentSurface = null
         try {
-            MPVLib.setPropertyString("vo", "null")
-            MPVLib.setPropertyString("force-window", "no")
             MPVLib.detachSurface()
         } catch (t: Throwable) {
         }

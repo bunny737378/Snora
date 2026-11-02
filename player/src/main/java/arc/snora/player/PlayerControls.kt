@@ -216,7 +216,8 @@ fun PlayerControls(
 
         // Material 3 Expressive contained loading indicator for initial load and rebuffering.
         if (state.status == PlaybackStatus.BUFFERING) {
-            M3ExpressiveLoadingIndicator(
+            ContainedLoadingIndicator(
+                size = 56.dp,
                 modifier = Modifier.align(Alignment.Center)
             )
         }
@@ -482,12 +483,11 @@ fun PlayerControls(
                 }
             }
 
-            // Bottom Bar with soft shadow gradient & SleekSeekBar
-            Column(
+            // Bottom Bar with soft shadow gradient anchored to bottom & SleekSeekBar
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 14.dp)
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -497,8 +497,13 @@ fun PlayerControls(
                             )
                         )
                     )
-                    .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .padding(bottom = 14.dp)
+                ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -567,15 +572,17 @@ fun PlayerControls(
                 }
             }
         }
+    }
 
-        // Shared preview overlay is used by both full-screen slide-seek and the standard seek bar.
-        if (state.slideSeekState.isActive && activeMenu == null) {
+        // Gesture slide-seek overlay is shown at the bottom only when HUD is hidden
+        if (state.slideSeekState.isActive && activeMenu == null && !isHudVisible) {
             SlideSeekFloatingOverlay(
                 slideState = state.slideSeekState,
                 currentPosMs = state.positionMs,
                 durationMs = state.durationMs,
-                showTimeline = !isHudVisible,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
             )
         }
 
@@ -585,21 +592,31 @@ fun PlayerControls(
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            // Soft gradient shadow extending past the menu from the right with doubled contrast
+            // Soft gradient shadow extending past the menu with uniform opacity over the entire menu area
+            val scrimBrush = if (isLandscape) {
+                Brush.horizontalGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color.Transparent,
+                        0.46f to Color.Transparent,
+                        0.58f to Color(0xAA000000),
+                        1.0f to Color(0xAA000000)
+                    )
+                )
+            } else {
+                Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color.Transparent,
+                        0.20f to Color.Transparent,
+                        0.28f to Color(0xAA000000),
+                        1.0f to Color(0xAA000000)
+                    )
+                )
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            colorStops = arrayOf(
-                                0.0f to Color.Transparent,
-                                0.35f to Color.Transparent,
-                                0.6f to Color(0x88000000),
-                                0.82f to Color(0xCC000000),
-                                1.0f to Color(0xF2000000)
-                            )
-                        )
-                    )
+                    .background(scrimBrush)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
@@ -671,110 +688,99 @@ fun SlideSeekFloatingOverlay(
     slideState: SlideSeekState,
     currentPosMs: Long,
     durationMs: Long,
-    showTimeline: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    BoxWithConstraints(modifier = modifier) {
-        val totalWidth = maxWidth
-        val fraction = slideState.seekFraction.coerceIn(0f, 1f)
+    val fraction = slideState.seekFraction.coerceIn(0f, 1f)
 
-        // Floating timestamp pill above the thumb position (no thumbnail box to eliminate seek lag)
-        val pillWidth = 72.dp
-        val maxOffsetPx = (totalWidth - pillWidth)
-        val xOffset = (maxOffsetPx * fraction).coerceIn(0.dp, totalWidth - pillWidth)
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .offset { IntOffset(xOffset.roundToPx(), 0) }
-                .padding(bottom = if (showTimeline) 36.dp else 56.dp)
-                .background(Color(0xDD0D0E12), RoundedCornerShape(14.dp))
-                .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(14.dp))
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            contentAlignment = Alignment.Center
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color.Transparent, Color(0x99000000))
+                )
+            )
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = formatTimestamp(slideState.targetMs),
+                text = formatTimestamp(currentPosMs),
                 color = Color.White,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Medium
             )
-        }
 
-        // Gesture-seek mini timeline is shown only when the standard controls are hidden.
-        if (showTimeline) Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color(0x88000000))
-                    )
-                )
-                .padding(horizontal = 14.dp, vertical = 8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            Spacer(modifier = Modifier.width(8.dp))
+
+            BoxWithConstraints(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(24.dp),
+                contentAlignment = Alignment.CenterStart
             ) {
-                Text(
-                    text = formatTimestamp(currentPosMs),
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                val trackWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val thumbRadiusPx = with(density) { 7.dp.toPx() }
+                val thumbCenterPx = (fraction * trackWidthPx).coerceIn(thumbRadiusPx, trackWidthPx - thumbRadiusPx)
+                val pillWidthPx = with(density) { 64.dp.toPx() }
+                val pillOffsetPx = (thumbCenterPx - pillWidthPx / 2f).coerceIn(0f, trackWidthPx - pillWidthPx)
 
-                Spacer(modifier = Modifier.width(8.dp))
-
+                // Background Track
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .height(24.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    // Background Track
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(1.5.dp))
-                            .background(Color(0x55FFFFFF))
-                    )
-
-                    // Active Played Track
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(fraction)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(1.5.dp))
-                            .background(Color(0xFF2979FF))
-                    )
-
-                    // YouTube style circular thumb moving with slide
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(fraction)
-                            .align(Alignment.CenterStart),
-                        contentAlignment = Alignment.CenterEnd
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(14.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF2979FF))
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Text(
-                    text = formatTimestamp(durationMs),
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(Color(0x55FFFFFF))
                 )
+
+                // Active Played Track
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(Color(0xFF2979FF))
+                )
+
+                // YouTube style circular thumb moving with slide
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset((thumbCenterPx - thumbRadiusPx).toInt(), 0) }
+                        .size(14.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2979FF))
+                )
+
+                // Floating timestamp badge strictly centered above the circle thumb
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(pillOffsetPx.toInt(), -with(density) { 34.dp.roundToPx() }) }
+                        .background(Color(0xDD0D0E12), RoundedCornerShape(12.dp))
+                        .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = formatTimestamp(slideState.targetMs),
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Text(
+                text = formatTimestamp(durationMs),
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
@@ -859,8 +865,10 @@ fun SleekSeekBar(
         )
 
         // Thumb circle
-        val thumbRadiusPx = with(androidx.compose.ui.platform.LocalDensity.current) { 6.5.dp.toPx() }
-        val thumbOffsetPx = (displayFraction * widthPx - thumbRadiusPx).coerceIn(0f, widthPx - thumbRadiusPx * 2)
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val thumbRadiusPx = with(density) { 6.5.dp.toPx() }
+        val thumbCenterPx = (displayFraction * widthPx).coerceIn(thumbRadiusPx, widthPx - thumbRadiusPx)
+        val thumbOffsetPx = thumbCenterPx - thumbRadiusPx
 
         Box(
             modifier = Modifier
@@ -869,6 +877,27 @@ fun SleekSeekBar(
                 .clip(CircleShape)
                 .background(Color(0xFF2979FF))
         )
+
+        // Floating timestamp badge strictly centered above the circle thumb during drag
+        if (isDragging) {
+            val pillWidthPx = with(density) { 64.dp.toPx() }
+            val pillOffsetPx = (thumbCenterPx - pillWidthPx / 2f).coerceIn(0f, widthPx - pillWidthPx)
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(pillOffsetPx.toInt(), -with(density) { 34.dp.roundToPx() }) }
+                    .background(Color(0xDD0D0E12), RoundedCornerShape(12.dp))
+                    .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = formatTimestamp((displayFraction * safeDuration).toLong()),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
     }
 }
 
@@ -1744,86 +1773,5 @@ fun formatTimestamp(ms: Long): String {
         String.format(Locale.US, "%d:%02d:%02d", h, m, s)
     } else {
         String.format(Locale.US, "%02d:%02d", m, s)
-    }
-}
-
-/**
- * Material 3 Expressive Contained Loading Indicator
- * Features a circular dark pill container with a rotating and morphing expressive arc.
- */
-@Composable
-fun M3ExpressiveLoadingIndicator(modifier: Modifier = Modifier) {
-    val infiniteTransition = rememberInfiniteTransition(label = "m3_expressive_contained_loading")
-
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-
-    val sweepAngle by infiniteTransition.animateFloat(
-        initialValue = 28f,
-        targetValue = 265f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 1200
-                28f at 0
-                260f at 600 using FastOutSlowInEasing
-                28f at 1200 using FastOutSlowInEasing
-            },
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "sweepAngle"
-    )
-
-    val startAngleOffset by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "startAngleOffset"
-    )
-
-    Box(
-        modifier = modifier
-            .size(64.dp)
-            .background(Color(0xEE14171E), CircleShape)
-            .border(1.dp, Color(0x33FFFFFF), CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.size(34.dp)) {
-            val strokeWidth = 3.5.dp.toPx()
-            val diameter = size.minDimension - strokeWidth
-            val arcSize = Size(diameter, diameter)
-            val topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f)
-
-            // Subtle track background ring
-            drawArc(
-                color = Color(0x334E5B6E),
-                startAngle = 0f,
-                sweepAngle = 360f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-            )
-
-            // Expressive active morphing arc
-            drawArc(
-                color = Color(0xFF80B5FF),
-                startAngle = (rotation + startAngleOffset) % 360f,
-                sweepAngle = sweepAngle,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-            )
-        }
     }
 }

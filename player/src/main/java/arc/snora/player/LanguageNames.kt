@@ -72,10 +72,21 @@ object LanguageNames {
         val language = languageFor(lang)
 
         return if (language != null) {
-            // Rules 1 & 2: language matched in map -> {lang full name}
             if (totalForLanguage > 1) {
-                "${language.fullName} $trackIndexForLanguage"
+                // When multiple tracks share the same language:
+                // Format: "{lang full name} - {title}"
+                if (cleanTitle.isNotEmpty()) {
+                    val prefix = "${language.fullName} -"
+                    if (cleanTitle.startsWith(prefix, ignoreCase = true)) {
+                        cleanTitle
+                    } else {
+                        "${language.fullName} - $cleanTitle"
+                    }
+                } else {
+                    "${language.fullName} - $fallback"
+                }
             } else {
+                // Single track for this language -> {lang full name}
                 language.fullName
             }
         } else {
