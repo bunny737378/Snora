@@ -44,6 +44,7 @@ import arc.snora.player.HwDecMode
 fun SettingsScreen(
     currentHwDec: HwDecMode,
     onHwDecChange: (HwDecMode) -> Unit,
+    onSubtitleSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showHwDecDialog by remember { mutableStateOf(false) }
@@ -99,6 +100,41 @@ fun SettingsScreen(
                     )
                     Text(
                         text = currentHwDec.label,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(onClick = onSubtitleSettingsClick)
+                .testTag("subtitle_layout_setting_card"),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Subtitles,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Subtitle Layout",
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 15.sp
+                    )
+                    Text(
+                        text = "Landscape preview, position, size, colours and background",
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )

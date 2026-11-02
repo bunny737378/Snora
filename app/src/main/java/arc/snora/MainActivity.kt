@@ -6,6 +6,7 @@ import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -44,7 +45,10 @@ import arc.snora.player.HwDecMode
 import arc.snora.player.PlayerController
 import arc.snora.player.PlayerView
 import arc.snora.player.SnoraPlayer
+import arc.snora.player.SubtitleAppearance
 import arc.snora.settings.SettingsScreen
+import arc.snora.settings.SubtitleSettingsScreen
+import arc.snora.settings.SubtitleSettingsStore
 import arc.snora.ui.theme.SnoraTheme
 import kotlinx.coroutines.launch
 
@@ -53,6 +57,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var player: SnoraPlayer
     private lateinit var playerController: PlayerController
     private lateinit var repository: MediaRepository
+    private var isPlayerActive: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,20 +80,48 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    fun setPlayerActive(active: Boolean) {
+        isPlayerActive = active
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (isPlayerActive && ::playerController.isInitialized) {
+            val direction = when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP -> 1
+                KeyEvent.KEYCODE_VOLUME_DOWN -> -1
+                else -> 0
+            }
+            if (direction != 0) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    playerController.onHardwareVolumeKey(direction)
+                }
+                // Consume both key down and key up so Android's volume panel is
+                // replaced by SNORA's own gesture indicator while playing.
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
     }
 
     override fun onDestroy() {
+        if (::playerController.isInitialized) {
+            playerController.onPlayerViewDisposed(this)
+        }
         super.onDestroy()
-        player.destroy()
+        if (::player.isInitialized) {
+            player.destroy()
+        }
     }
 }
 
 @Composable
 fun MainContent(
-    activity: ComponentActivity,
+    activity: MainActivity,
     player: SnoraPlayer,
     controller: PlayerController,
     repository: MediaRepository,
@@ -98,6 +131,11 @@ fun MainContent(
     var currentDestination by remember { mutableStateOf(AppDestination.HOME) }
     var activeVideo by remember { mutableStateOf<VideoItem?>(null) }
     var activeTitle by remember { mutableStateOf("") }
+    var showSubtitleSettings by remember { mutableStateOf(false) }
+    val subtitleSettingsStore = remember(activity) { SubtitleSettingsStore(activity) }
+    var subtitleAppearance by remember {
+        mutableStateOf<SubtitleAppearance>(subtitleSettingsStore.load())
+    }
 
     var videos by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var folders by remember { mutableStateOf<List<FolderGroup>>(emptyList()) }
@@ -144,14 +182,22 @@ fun MainContent(
                 folderName = ""
             )
             activeTitle = title
+            activity.setPlayerActive(true)
             setFullscreen(true)
             val source = if (path.isNotBlank()) path else uriString
-            player.playMedia(source, 0L)
+            val customAppearance = subtitleAppearance.takeUnless { it.isDefault() }
+            if (customAppearance == null) {
+                // Let the player use its own defaults when nothing was customized.
+                player.playMedia(source, 0L)
+            } else {
+                player.playMedia(source, 0L, customAppearance)
+            }
         }
     }
 
     fun closePlayer() {
-        player.pause()
+        activity.setPlayerActive(false)
+        player.stopPlayback()
         setFullscreen(false)
         activeVideo = null
     }
@@ -199,6 +245,18 @@ fun MainContent(
                     closePlayer()
                 }
             }
+        )
+    } else if (showSubtitleSettings) {
+        BackHandler(enabled = true) {
+            showSubtitleSettings = false
+        }
+        SubtitleSettingsScreen(
+            appearance = subtitleAppearance,
+            onAppearanceChange = { appearance ->
+                subtitleAppearance = appearance
+                subtitleSettingsStore.save(appearance)
+            },
+            onBack = { showSubtitleSettings = false }
         )
     } else {
         Scaffold(
@@ -250,7 +308,8 @@ fun MainContent(
                             onHwDecChange = { mode ->
                                 currentHwDec = mode
                                 player.videoRenderer.setHwDecMode(mode)
-                            }
+                            },
+                            onSubtitleSettingsClick = { showSubtitleSettings = true }
                         )
                     }
                 }

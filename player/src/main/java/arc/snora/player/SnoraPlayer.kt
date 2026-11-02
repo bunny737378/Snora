@@ -14,6 +14,7 @@ import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -22,20 +23,36 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+data class VolumeUiState(
+    val level: Int,
+    val percent: Int,
+    val isBoost: Boolean
+)
 
 class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     private val playerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val mpvCommandDispatcher = Dispatchers.IO.limitedParallelism(1)
+
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
     private var currentSurface: Surface? = null
+    @Volatile private var isSurfaceAttached: Boolean = false
     private var progressJob: Job? = null
+    private var pausedRedrawJob: Job? = null
     private var currentPathOrUri: String = ""
+    private var pendingStartPositionMs: Long = 0L
+    @Volatile private var needsFileLoad: Boolean = false
     private var isMpvInitialized: Boolean = false
-    private var isMpvPlaying: Boolean = false
+    @Volatile private var isMpvPlaying: Boolean = false
+    @Volatile private var playbackRequestId: Long = 0L
     private var voInUse: String = "gpu"
+    private var preferredHwDecMode: HwDecMode = HwDecMode.AUTO
     @Volatile private var isBuffering: Boolean = false
     private var timelinePreparedForMs: Long = 0L
 
@@ -78,7 +95,9 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         }
         setupMediaSession()
         val currentSysVol = systemAudioManager?.getStreamVolume(AndroidAudioManager.STREAM_MUSIC) ?: 10
-        val initialLevel = ((currentSysVol.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f).toInt().coerceIn(1, 15)
+        val initialLevel = ((currentSysVol.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f)
+            .roundToInt()
+            .coerceIn(0, 15)
         _playbackState.value = _playbackState.value.copy(
             volumeLevel = initialLevel,
             videoInfo = VideoInfo(hwdecActive = "HW")
@@ -204,17 +223,25 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun attachSurface(surface: Surface) {
+        if (isSurfaceAttached && currentSurface === surface) {
+            loadPendingMediaIfReady()
+            return
+        }
+
         currentSurface = surface
         try {
             ensureMpvCreated()
+
+            // mpv must receive the new Android window before its video output is
+            // re-enabled. Doing this in the opposite order can leave mpv rendering
+            // to the previous, already destroyed surface (audio keeps playing).
+            MPVLib.attachSurface(surface)
+            isSurfaceAttached = true
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", voInUse)
-            MPVLib.attachSurface(surface)
             MPVLib.setPropertyString("vid", "auto")
 
-            if (currentPathOrUri.isNotEmpty() && !isMpvPlaying) {
-                playMedia(currentPathOrUri, 0L)
-            }
+            loadPendingMediaIfReady()
         } catch (t: Throwable) {
         }
     }
@@ -224,62 +251,164 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             MPVLib.setPropertyString("android-surface-size", "${width}x$height")
         } catch (t: Throwable) {
         }
+        if (_playbackState.value.status == PlaybackStatus.PAUSED) {
+            schedulePausedFrameRedraw(delayMs = 80L)
+        }
     }
 
     fun detachSurface() {
         currentSurface = null
+        if (!isSurfaceAttached) return
+        isSurfaceAttached = false
+
         try {
-            MPVLib.detachSurface()
+            // Tear down the video output before releasing the Surface global ref.
+            // SurfaceView and DisposableEffect can both report the same teardown,
+            // so the guard above deliberately makes this operation idempotent.
+            MPVLib.setPropertyString("vo", "null")
+            MPVLib.setPropertyString("force-window", "no")
         } catch (t: Throwable) {
+        } finally {
+            try {
+                MPVLib.detachSurface()
+            } catch (t: Throwable) {
+            }
         }
     }
 
-    fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
+    fun playMedia(
+        pathOrUri: String,
+        startPositionMs: Long = 0L,
+        subtitleAppearance: SubtitleAppearance? = null
+    ) {
+        playbackRequestId += 1L
         currentPathOrUri = pathOrUri
+        pendingStartPositionMs = startPositionMs.coerceAtLeast(0L)
+        needsFileLoad = true
         thumbnailLoader.setDataSource(pathOrUri)
         ensureMpvCreated()
         requestAudioFocus()
 
         isMpvPlaying = true
-        currentSurface?.let {
-            try {
-                MPVLib.attachSurface(it)
-                MPVLib.setOptionString("force-window", "yes")
-                MPVLib.setPropertyString("vo", voInUse)
-            } catch (t: Throwable) {
-            }
-        }
-
         isBuffering = true
         timelinePreparedForMs = 0L
-        _playbackState.value = _playbackState.value.copy(
+        pausedRedrawJob?.cancel()
+
+        // A new item gets a new playback session. mpv otherwise retains speed,
+        // panscan/aspect, delays and track selection across loadfile calls.
+        // Device volume and the explicit decoder preference are not per-video
+        // playback state, so those two are intentionally retained.
+        val decoderMode = preferredHwDecMode
+        _playbackState.value = PlaybackState(
             status = PlaybackStatus.BUFFERING,
-            positionMs = 0L,
-            errorMessage = null
+            volumeLevel = _playbackState.value.volumeLevel.coerceIn(0, 15),
+            subtitleAppearance = subtitleAppearance,
+            hwDecMode = decoderMode,
+            hwDecCurrent = if (decoderMode == HwDecMode.AUTO) "auto" else "no",
+            videoInfo = VideoInfo(
+                hwdecActive = if (decoderMode == HwDecMode.AUTO) "HW" else "SW"
+            )
         )
         updateMediaSessionState()
 
-        try {
-            MPVLib.command(arrayOf("loadfile", pathOrUri))
-            MPVLib.setPropertyBoolean("pause", false)
-        } catch (t: Throwable) {
-            isBuffering = false
-            _playbackState.value = _playbackState.value.copy(
-                status = PlaybackStatus.ERROR,
-                errorMessage = t.localizedMessage ?: "Failed to open video"
-            )
-            updateMediaSessionState()
+        // A tap normally happens before Compose has created the SurfaceView.
+        // Keep the request pending instead of starting an audio-only mpv file with
+        // no window. surfaceCreated() will call this once the window is valid.
+        loadPendingMediaIfReady()
+    }
+
+    /** Must run on mpvCommandDispatcher immediately before a new loadfile. */
+    private fun applyFreshPlaybackDefaults() {
+        MPVLib.setPropertyDouble("speed", 1.0)
+        MPVLib.setPropertyDouble("audio-delay", 0.0)
+        MPVLib.setPropertyDouble("sub-delay", 0.0)
+        MPVLib.setPropertyString("aid", "auto")
+        MPVLib.setPropertyString("sid", "auto")
+        MPVLib.setPropertyDouble("volume", 100.0)
+        MPVLib.setPropertyString("keepaspect", "yes")
+        MPVLib.setPropertyDouble("panscan", 0.0)
+        MPVLib.setPropertyString("video-aspect-override", "-1")
+        MPVLib.setPropertyString(
+            "hwdec",
+            if (preferredHwDecMode == HwDecMode.AUTO) "auto" else "no"
+        )
+    }
+
+    private fun loadPendingMediaIfReady() {
+        if (!needsFileLoad || !isMpvPlaying || !isSurfaceAttached) return
+        if (currentSurface?.isValid != true || currentPathOrUri.isEmpty()) return
+
+        val requestId = playbackRequestId
+        val source = currentPathOrUri
+        val startPositionMs = pendingStartPositionMs
+        needsFileLoad = false
+
+        // loadfile can wait for demuxer/codec setup. Serialize it with stop and
+        // renderer commands, but never make the tap or Surface callback wait for it.
+        playerScope.launch(mpvCommandDispatcher) {
+            if (requestId != playbackRequestId || !isMpvPlaying || !isSurfaceAttached) {
+                return@launch
+            }
+
+            try {
+                applyFreshPlaybackDefaults()
+                MPVLib.command(arrayOf("loadfile", source))
+                if (requestId != playbackRequestId || !isMpvPlaying) return@launch
+
+                if (startPositionMs > 0L) {
+                    MPVLib.command(
+                        arrayOf("seek", (startPositionMs / 1000.0).toString(), "absolute")
+                    )
+                }
+                MPVLib.setPropertyBoolean("pause", false)
+            } catch (t: Throwable) {
+                if (requestId == playbackRequestId) {
+                    isBuffering = false
+                    _playbackState.value = _playbackState.value.copy(
+                        status = PlaybackStatus.ERROR,
+                        errorMessage = t.localizedMessage ?: "Failed to open video"
+                    )
+                    updateMediaSessionState()
+                }
+                return@launch
+            }
+
+            startMpvProgressTracker()
+
+            // Track enumeration performs many synchronous JNI property reads.
+            playerScope.launch(Dispatchers.IO) {
+                delay(400)
+                if (requestId != playbackRequestId) return@launch
+                refreshTracks()
+                delay(800)
+                if (requestId != playbackRequestId) return@launch
+                refreshTracks()
+                delay(1500)
+                if (requestId != playbackRequestId) return@launch
+                refreshTracks()
+            }
         }
+    }
 
-        startMpvProgressTracker()
+    /** Stops the old item without blocking Back or the next video tap. */
+    fun stopPlayback() {
+        playbackRequestId += 1L
+        val requestId = playbackRequestId
+        isMpvPlaying = false
+        needsFileLoad = false
+        isBuffering = false
+        progressJob?.cancel()
+        pausedRedrawJob?.cancel()
+        abandonAudioFocus()
+        _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
+        updateMediaSessionState()
 
-        playerScope.launch {
-            delay(400)
-            refreshTracks()
-            delay(800)
-            refreshTracks()
-            delay(1500)
-            refreshTracks()
+        playerScope.launch(mpvCommandDispatcher) {
+            if (requestId != playbackRequestId) return@launch
+            try {
+                MPVLib.command(arrayOf("stop"))
+            } catch (t: Throwable) {
+            }
         }
     }
 
@@ -369,7 +498,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     private fun startMpvProgressTracker() {
         progressJob?.cancel()
-        progressJob = playerScope.launch {
+        progressJob = playerScope.launch(Dispatchers.IO) {
             while (isActive && isMpvPlaying) {
                 try {
                     val timePosSec = MPVLib.getPropertyDouble("time-pos") ?: 0.0
@@ -455,7 +584,14 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun seekTo(positionMs: Long) {
-        val clamped = positionMs.coerceIn(0L, _playbackState.value.durationMs.coerceAtLeast(1L))
+        val durationMs = _playbackState.value.durationMs
+        // Never clamp an unknown duration to 1 ms: doing so turns a valid slide
+        // release into an unexpected jump back to the beginning.
+        val clamped = if (durationMs > 0L) {
+            positionMs.coerceIn(0L, durationMs)
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
         try {
             val sec = (clamped / 1000.0).toString()
             MPVLib.command(arrayOf("seek", sec, "absolute"))
@@ -481,45 +617,71 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun setAspectRatioMode(mode: AspectRatioMode) {
-        try {
-            when (mode) {
-                AspectRatioMode.FIT -> {
-                    MPVLib.setPropertyString("keepaspect", "yes")
-                    MPVLib.setPropertyDouble("panscan", 0.0)
-                    MPVLib.setPropertyString("video-aspect-override", "-1")
-                }
-                AspectRatioMode.CROP -> {
-                    MPVLib.setPropertyString("keepaspect", "yes")
-                    MPVLib.setPropertyDouble("panscan", 1.0)
-                    MPVLib.setPropertyString("video-aspect-override", "-1")
-                }
-                AspectRatioMode.FILL -> {
-                    MPVLib.setPropertyString("keepaspect", "no")
-                    MPVLib.setPropertyDouble("panscan", 0.0)
-                    MPVLib.setPropertyString("video-aspect-override", "-1")
-                }
-                AspectRatioMode.RATIO_16_9 -> {
-                    MPVLib.setPropertyString("keepaspect", "yes")
-                    MPVLib.setPropertyDouble("panscan", 0.0)
-                    MPVLib.setPropertyString("video-aspect-override", "16:9")
-                }
-                AspectRatioMode.RATIO_1_1 -> {
-                    MPVLib.setPropertyString("keepaspect", "yes")
-                    MPVLib.setPropertyDouble("panscan", 0.0)
-                    MPVLib.setPropertyString("video-aspect-override", "1:1")
-                }
-                AspectRatioMode.RATIO_4_3 -> {
-                    MPVLib.setPropertyString("keepaspect", "yes")
-                    MPVLib.setPropertyDouble("panscan", 0.0)
-                    MPVLib.setPropertyString("video-aspect-override", "4:3")
-                }
-            }
-            if (_playbackState.value.status != PlaybackStatus.PLAYING) {
-                MPVLib.command(arrayOf("seek", "0", "relative+exact"))
-            }
-        } catch (t: Throwable) {
-        }
+        // Playing video resizes directly. A paused software-decoded frame may
+        // need one same-position redraw after the new renderer properties.
         _playbackState.value = _playbackState.value.copy(aspectRatioMode = mode)
+        val requestId = playbackRequestId
+        playerScope.launch(mpvCommandDispatcher) {
+            try {
+                when (mode) {
+                    AspectRatioMode.FIT -> {
+                        MPVLib.setPropertyString("keepaspect", "yes")
+                        MPVLib.setPropertyDouble("panscan", 0.0)
+                        MPVLib.setPropertyString("video-aspect-override", "-1")
+                    }
+                    AspectRatioMode.CROP -> {
+                        MPVLib.setPropertyString("keepaspect", "yes")
+                        MPVLib.setPropertyDouble("panscan", 1.0)
+                        MPVLib.setPropertyString("video-aspect-override", "-1")
+                    }
+                    AspectRatioMode.FILL -> {
+                        MPVLib.setPropertyString("keepaspect", "no")
+                        MPVLib.setPropertyDouble("panscan", 0.0)
+                        MPVLib.setPropertyString("video-aspect-override", "-1")
+                    }
+                    AspectRatioMode.RATIO_16_9 -> {
+                        MPVLib.setPropertyString("keepaspect", "yes")
+                        MPVLib.setPropertyDouble("panscan", 0.0)
+                        MPVLib.setPropertyString("video-aspect-override", "16:9")
+                    }
+                    AspectRatioMode.RATIO_1_1 -> {
+                        MPVLib.setPropertyString("keepaspect", "yes")
+                        MPVLib.setPropertyDouble("panscan", 0.0)
+                        MPVLib.setPropertyString("video-aspect-override", "1:1")
+                    }
+                    AspectRatioMode.RATIO_4_3 -> {
+                        MPVLib.setPropertyString("keepaspect", "yes")
+                        MPVLib.setPropertyDouble("panscan", 0.0)
+                        MPVLib.setPropertyString("video-aspect-override", "4:3")
+                    }
+                }
+                redrawPausedFrameOnWorker(requestId)
+            } catch (t: Throwable) {
+            }
+        }
+    }
+
+    private fun schedulePausedFrameRedraw(delayMs: Long) {
+        val requestId = playbackRequestId
+        pausedRedrawJob?.cancel()
+        pausedRedrawJob = playerScope.launch(mpvCommandDispatcher) {
+            delay(delayMs)
+            redrawPausedFrameOnWorker(requestId)
+        }
+    }
+
+    /** Redraws the current frame without resuming or changing its timestamp. */
+    private fun redrawPausedFrameOnWorker(requestId: Long) {
+        if (requestId != playbackRequestId || !isMpvPlaying || !isSurfaceAttached) return
+        if (_playbackState.value.status != PlaybackStatus.PAUSED) return
+
+        val isPaused = MPVLib.getPropertyBoolean("pause") ?: return
+        if (!isPaused) return
+        val positionSeconds = _playbackState.value.positionMs.coerceAtLeast(0L) / 1000.0
+        MPVLib.command(
+            arrayOf("seek", positionSeconds.toString(), "absolute+exact")
+        )
+        MPVLib.setPropertyBoolean("pause", true)
     }
 
     fun toggleHwDec() {
@@ -565,6 +727,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun setHwDecMode(mode: HwDecMode) {
+        preferredHwDecMode = mode
         val target = if (mode == HwDecMode.AUTO) "auto" else "no"
         try {
             MPVLib.setPropertyString("hwdec", target)
@@ -579,14 +742,20 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         }
     }
 
-    fun setVolume30(level: Int) {
+    fun setVolume30(level: Int): VolumeUiState {
         val clamped = level.coerceIn(0, 30)
         _playbackState.value = _playbackState.value.copy(volumeLevel = clamped)
 
         if (clamped <= 15) {
-            val deviceTarget = ((clamped.toFloat() / 15f) * maxDeviceVolume.toFloat()).toInt().coerceIn(0, maxDeviceVolume)
+            val deviceTarget = ((clamped.toFloat() / 15f) * maxDeviceVolume.toFloat())
+                .roundToInt()
+                .coerceIn(0, maxDeviceVolume)
             try {
-                systemAudioManager?.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, deviceTarget, 0)
+                systemAudioManager?.setStreamVolume(
+                    AndroidAudioManager.STREAM_MUSIC,
+                    deviceTarget,
+                    0
+                )
                 MPVLib.setPropertyDouble("volume", 100.0)
             } catch (t: Throwable) {
             }
@@ -594,10 +763,53 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             val boostSteps = clamped - 15
             val boostPercent = 100.0 + (boostSteps.toDouble() / 15.0) * 100.0
             try {
-                systemAudioManager?.setStreamVolume(AndroidAudioManager.STREAM_MUSIC, maxDeviceVolume, 0)
+                systemAudioManager?.setStreamVolume(
+                    AndroidAudioManager.STREAM_MUSIC,
+                    maxDeviceVolume,
+                    0
+                )
                 MPVLib.setPropertyDouble("volume", boostPercent)
             } catch (t: Throwable) {
             }
+        }
+        return VolumeUiState(
+            level = clamped,
+            percent = ((clamped.toFloat() / 15f) * 100f).roundToInt(),
+            isBoost = clamped > 15
+        )
+    }
+
+    /** Changes the real media stream by one hardware-key step, without a system popup. */
+    fun adjustDeviceVolume(direction: Int): VolumeUiState {
+        val audio = systemAudioManager
+            ?: return setVolume30(
+                (_playbackState.value.volumeLevel + direction).coerceIn(0, 15)
+            )
+
+        return try {
+            // Hardware buttons always control the device stream, not mpv boost.
+            MPVLib.setPropertyDouble("volume", 100.0)
+            audio.adjustStreamVolume(
+                AndroidAudioManager.STREAM_MUSIC,
+                if (direction >= 0) AndroidAudioManager.ADJUST_RAISE else AndroidAudioManager.ADJUST_LOWER,
+                0
+            )
+            val deviceLevel = audio.getStreamVolume(AndroidAudioManager.STREAM_MUSIC)
+            val level = ((deviceLevel.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f)
+                .roundToInt()
+                .coerceIn(0, 15)
+            val percent = ((deviceLevel.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 100f)
+                .roundToInt()
+                .coerceIn(0, 100)
+            _playbackState.value = _playbackState.value.copy(volumeLevel = level)
+            VolumeUiState(level = level, percent = percent, isBoost = false)
+        } catch (t: Throwable) {
+            val current = _playbackState.value.volumeLevel.coerceIn(0, 15)
+            VolumeUiState(
+                level = current,
+                percent = ((current.toFloat() / 15f) * 100f).roundToInt(),
+                isBoost = false
+            )
         }
     }
 
@@ -740,8 +952,11 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun destroy() {
+        playbackRequestId += 1L
         progressJob?.cancel()
+        pausedRedrawJob?.cancel()
         isMpvPlaying = false
+        needsFileLoad = false
         isBuffering = false
         abandonAudioFocus()
         try {
@@ -762,6 +977,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         } catch (t: Throwable) {
         }
         currentSurface = null
+        isSurfaceAttached = false
         _playbackState.value = PlaybackState(status = PlaybackStatus.IDLE)
     }
 }

@@ -58,9 +58,62 @@ class PlayerController(
     private var isScrubbing: Boolean = false
 
     private var accumulatedVolumeDelta: Float = 0f
+    private var brightnessBeforePlayer: Float? = null
+    private var currentBrightness: Float? = null
 
     init {
         scheduleAutoHide()
+    }
+
+    fun onPlayerViewCreated(activity: Activity?) {
+        if (activity != null && brightnessBeforePlayer == null) {
+            val attributes = activity.window.attributes
+            brightnessBeforePlayer = attributes.screenBrightness
+            currentBrightness = if (attributes.screenBrightness >= 0f) {
+                attributes.screenBrightness
+            } else {
+                readSystemBrightness(activity)
+            }
+        }
+        accumulatedVolumeDelta = 0f
+        isScrubbing = false
+        _gestureState.value = GestureOverlayState()
+        _doubleTapSeekState.value = DoubleTapSeekState()
+        showHud()
+    }
+
+    fun onPlayerViewDisposed(activity: Activity?) {
+        autoHideJob?.cancel()
+        gestureHideJob?.cancel()
+        doubleTapJob?.cancel()
+        timelinePreviewJob?.cancel()
+        _gestureState.value = GestureOverlayState()
+        _doubleTapSeekState.value = DoubleTapSeekState()
+
+        val original = brightnessBeforePlayer
+        if (activity != null && original != null) {
+            // Window brightness controls the real display while SNORA is visible,
+            // not a video shader. Restoring the original override also restores
+            // the system's previous brightness as soon as the player closes.
+            val attributes = activity.window.attributes
+            attributes.screenBrightness = original
+            activity.window.attributes = attributes
+        }
+        brightnessBeforePlayer = null
+        currentBrightness = null
+        accumulatedVolumeDelta = 0f
+    }
+
+    private fun readSystemBrightness(activity: Activity): Float {
+        val brightness = try {
+            Settings.System.getInt(
+                activity.contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS
+            ).toFloat() / 255f
+        } catch (e: Exception) {
+            0.5f
+        }
+        return brightness.coerceIn(0.01f, 1f)
     }
 
     fun setScrubbing(scrubbing: Boolean) {
@@ -168,21 +221,26 @@ class PlayerController(
         if (steps != 0) {
             val current = player.playbackState.value.volumeLevel
             val target = (current + steps).coerceIn(0, 30)
-            player.setVolume30(target)
+            val volume = player.setVolume30(target)
             accumulatedVolumeDelta -= steps
-
-            val isBoost = target > 15
-            val label = "$target%"
-            val progress = target.toFloat() / 30f
-
-            showGestureOverlay(
-                type = GestureIconType.VOLUME,
-                text = label,
-                progress = progress,
-                volLevel = target,
-                boost = isBoost
-            )
+            showVolumeOverlay(volume)
         }
+    }
+
+    fun onHardwareVolumeKey(direction: Int) {
+        dismissBrightnessImmediately()
+        hideHud()
+        showVolumeOverlay(player.adjustDeviceVolume(direction))
+    }
+
+    private fun showVolumeOverlay(volume: VolumeUiState) {
+        showGestureOverlay(
+            type = GestureIconType.VOLUME,
+            text = "${volume.percent}%",
+            progress = volume.level.toFloat() / 30f,
+            volLevel = volume.level,
+            boost = volume.isBoost
+        )
     }
 
     fun adjustBrightnessGesture(activity: Activity?, deltaPercent: Float) {
@@ -190,19 +248,14 @@ class PlayerController(
         hideHud()
 
         activity?.let { act ->
-            val lp = act.window.attributes
-            var current = lp.screenBrightness
-            if (current < 0) {
-                current = try {
-                    Settings.System.getInt(
-                        act.contentResolver,
-                        Settings.System.SCREEN_BRIGHTNESS
-                    ) / 255f
-                } catch (e: Exception) {
-                    0.5f
-                }
+            if (brightnessBeforePlayer == null) {
+                brightnessBeforePlayer = act.window.attributes.screenBrightness
+                currentBrightness = readSystemBrightness(act)
             }
+            val current = currentBrightness ?: readSystemBrightness(act)
             val target = (current + deltaPercent).coerceIn(0.01f, 1.0f)
+            currentBrightness = target
+            val lp = act.window.attributes
             lp.screenBrightness = target
             act.window.attributes = lp
             val percentInt = (target * 100).toInt().coerceIn(1, 100)
@@ -312,19 +365,19 @@ class PlayerController(
         }
     }
 
-    private var wasPlayingBeforeSlide: Boolean = false
     private var isThumbnailLoading: Boolean = false
     private var lastThumbnailRequestMs: Long = -1L
+    private var slideSeekStartPositionMs: Long = 0L
+    private var hasValidSlideSeek: Boolean = false
 
     fun onSlideSeekStart() {
         dismissGestureOverlayImmediately()
         hideHud()
-        val currentStatus = player.playbackState.value.status
-        wasPlayingBeforeSlide = (currentStatus == PlaybackStatus.PLAYING)
-        if (wasPlayingBeforeSlide) {
-            player.pause()
-        }
+        // VLC keeps playback running and holds a forced preview time while the
+        // finger moves. Only one real seek is issued on release.
         val pos = player.playbackState.value.positionMs
+        slideSeekStartPositionMs = pos
+        hasValidSlideSeek = false
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val initialFraction = (pos.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
         lastThumbnailRequestMs = -1L
@@ -342,9 +395,11 @@ class PlayerController(
     }
 
     fun onSlideSeek(targetMs: Long, fraction: Float) {
+        val duration = player.playbackState.value.durationMs
+        if (duration <= 0L) return
         val clampedFraction = fraction.coerceIn(0f, 1f)
-        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val clampedTargetMs = targetMs.coerceIn(0L, duration)
+        hasValidSlideSeek = clampedTargetMs != slideSeekStartPositionMs
 
         player.updateState {
             it.copy(
@@ -388,13 +443,23 @@ class PlayerController(
     }
 
     fun onSlideSeekEnd() {
-        val targetMs = player.playbackState.value.slideSeekState.targetMs
-        player.seekTo(targetMs)
+        val state = player.playbackState.value
+        if (!state.slideSeekState.isActive) return
+
         player.updateState {
             it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
-        if (wasPlayingBeforeSlide) {
-            player.resume()
+        if (hasValidSlideSeek && state.durationMs > 0L) {
+            player.seekTo(state.slideSeekState.targetMs.coerceIn(0L, state.durationMs))
+        }
+        hasValidSlideSeek = false
+    }
+
+    fun onSlideSeekCancel() {
+        // An interrupted gesture must never fall through to an arbitrary seek.
+        hasValidSlideSeek = false
+        player.updateState {
+            it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
     }
 }

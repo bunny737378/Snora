@@ -2,12 +2,17 @@ package arc.snora.player
 
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
@@ -26,7 +31,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,7 +39,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -56,7 +59,6 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -73,6 +75,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.runtime.getValue
@@ -83,8 +86,10 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -94,6 +99,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -101,6 +107,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.sin
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -116,6 +124,7 @@ fun PlayerControls(
     onTogglePlayPause: () -> Unit,
     onSeek: (Long) -> Unit,
     onSeekRelative: (Double) -> Unit,
+    onSeekStep: (Boolean) -> Unit = { forward -> onSeekRelative(if (forward) 10.0 else -10.0) },
     onSetSpeed: (Float) -> Unit,
     onSelectAspectRatio: (AspectRatioMode) -> Unit,
     onCycleAspectRatio: () -> Unit,
@@ -138,25 +147,48 @@ fun PlayerControls(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val coroutineScope = rememberCoroutineScope()
     var aspectToastText by remember { mutableStateOf<String?>(null) }
+    val hudProgress by animateFloatAsState(
+        targetValue = if (isHudVisible && activeMenu == null) 1f else 0f,
+        animationSpec = tween(durationMillis = 140, easing = FastOutSlowInEasing),
+        label = "classic_hud_visibility"
+    )
 
     Box(modifier = modifier.fillMaxSize()) {
 
-        // YouTube Style Double Tap Seek Overlay (Always active and visible above controls)
-        YouTubeSeekRippleOverlay(state = doubleTapSeekState)
+        // Compact circular seek feedback, independent from HUD visibility.
+        ClassicSeekPulseOverlay(state = doubleTapSeekState)
 
-        // Subtitle overlay: Only visible when subtitles are NOT disabled (-1)
+        // Subtitle overlay: null appearance deliberately preserves player defaults.
         if (state.selectedSubtitleTrackId != -1 && state.currentSubtitleText.isNotBlank()) {
-            Box(
-                modifier = Modifier
+            val appearance = state.subtitleAppearance
+            val subtitleTextColor = appearance?.let { Color(it.textColorArgb) } ?: Color.Yellow
+            val subtitleBackgroundColor = appearance?.let {
+                Color(it.backgroundColorArgb).copy(alpha = it.backgroundOpacity)
+            } ?: Color(0xCC000000)
+            val subtitleModifier = if (appearance == null) {
+                Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = if (isHudVisible || state.slideSeekState.isActive) 100.dp else 24.dp)
-                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+            } else {
+                Modifier
+                    .align(
+                        BiasAlignment(
+                            horizontalBias = appearance.horizontalPosition * 2f - 1f,
+                            verticalBias = (1f - appearance.verticalPosition) * 2f - 1f
+                        )
+                    )
+                    .padding(horizontal = 20.dp, vertical = 20.dp)
+            }
+
+            Box(
+                modifier = subtitleModifier
+                    .background(subtitleBackgroundColor, RoundedCornerShape(6.dp))
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text(
                     text = state.currentSubtitleText,
-                    color = Color.Yellow,
-                    fontSize = 17.sp,
+                    color = subtitleTextColor,
+                    fontSize = (appearance?.fontSizeSp ?: SubtitleAppearance.DEFAULT_FONT_SIZE_SP).sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center
                 )
@@ -236,9 +268,10 @@ fun PlayerControls(
                         .testTag("unlock_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Lock,
+                        painter = painterResource(R.drawable.ic_lock),
                         contentDescription = "Unlock Controls",
-                        tint = Color(0xFF2979FF)
+                        tint = Color(0xFF2979FF),
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
@@ -264,14 +297,18 @@ fun PlayerControls(
             }
         }
 
-        // Normal HUD Controls
-        if (isHudVisible && activeMenu == null) {
+        // Classic HUD: quick opacity plus small directional travel, never a heavy sheet animation.
+        if (hudProgress > 0.001f) {
 
             // Top Bar with soft shadow gradient
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationY = -48f * (1f - hudProgress)
+                    }
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -297,44 +334,15 @@ fun PlayerControls(
                     )
                 }
 
-                // Title: Up to full half screen
+                // Centered, quiet two-line title between stable navigation actions.
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(0.5f)
-                        .padding(horizontal = 6.dp)
+                        .weight(1f)
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    val splitTitle = title.split(" - ", " / ", " | ")
-                    if (splitTitle.size > 1 && isLandscape) {
-                        Column {
-                            Text(
-                                text = splitTitle[0].trim(),
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = splitTitle.drop(1).joinToString(" - ").trim(),
-                                color = Color(0x99FFFFFF),
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = title,
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = if (isLandscape) 2 else 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    PlayerTitle(title = title)
                 }
-
-                Spacer(modifier = Modifier.weight(1f))
 
                 // Right-anchored icons row (fixed position, never moves on short title)
                 Row(
@@ -355,32 +363,6 @@ fun PlayerControls(
 
                     Spacer(modifier = Modifier.width(4.dp))
 
-                    // Audio Track Menu Button
-                    IconButton(
-                        onClick = { onSetActiveMenu("audio") },
-                        modifier = Modifier.size(36.dp).testTag("audio_menu_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
-                            contentDescription = "Audio Track",
-                            tint = Color.White,
-                            modifier = Modifier.size(21.dp)
-                        )
-                    }
-
-                    // Subtitle Menu Button
-                    IconButton(
-                        onClick = { onSetActiveMenu("subtitle") },
-                        modifier = Modifier.size(36.dp).testTag("subtitle_menu_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Subtitles,
-                            contentDescription = "Subtitle Track",
-                            tint = Color.White,
-                            modifier = Modifier.size(21.dp)
-                        )
-                    }
-
                     // Chapter Menu Button
                     if (state.chapters.isNotEmpty()) {
                         IconButton(
@@ -396,45 +378,13 @@ fun PlayerControls(
                         }
                     }
 
-                    // Aspect Ratio Button: Single click cycles, Hold 1 sec opens menu
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .combinedClickable(
-                                onClick = {
-                                    val modes = AspectRatioMode.values()
-                                    val nextIndex = (state.aspectRatioMode.ordinal + 1) % modes.size
-                                    val nextMode = modes[nextIndex]
-                                    onCycleAspectRatio()
-                                    aspectToastText = nextMode.label
-                                    coroutineScope.launch {
-                                        delay(1200)
-                                        if (aspectToastText == nextMode.label) {
-                                            aspectToastText = null
-                                        }
-                                    }
-                                },
-                                onLongClick = { onSetActiveMenu("aspect") }
-                            )
-                            .testTag("aspect_ratio_button"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AspectRatio,
-                            contentDescription = "Aspect Ratio",
-                            tint = Color.White,
-                            modifier = Modifier.size(21.dp)
-                        )
-                    }
-
                     // Lock Controls Button
                     IconButton(
                         onClick = onToggleLock,
                         modifier = Modifier.size(36.dp).testTag("lock_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.LockOpen,
+                            painter = painterResource(R.drawable.ic_unlock),
                             contentDescription = "Lock Controls",
                             tint = Color.White,
                             modifier = Modifier.size(20.dp)
@@ -443,51 +393,80 @@ fun PlayerControls(
                 }
             }
 
-            // Center Play / Pause / Replay button
-            Box(
-                modifier = Modifier.align(Alignment.Center),
-                contentAlignment = Alignment.Center
+            // Classic center transport: transparent 10-second seek actions around play/pause.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        scaleX = 0.94f + (0.06f * hudProgress)
+                        scaleY = 0.94f + (0.06f * hudProgress)
+                    },
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 if (state.status == PlaybackStatus.ENDED) {
                     IconButton(
                         onClick = onReplay,
-                        modifier = Modifier
-                            .size(64.dp)
-                            .background(Color(0xCC0D0E12), CircleShape)
-                            .border(1.dp, Color(0x33FFFFFF), CircleShape)
-                            .testTag("replay_button")
+                        modifier = Modifier.size(68.dp).testTag("replay_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Replay,
                             contentDescription = "Replay Video",
                             tint = Color.White,
-                            modifier = Modifier.size(38.dp)
+                            modifier = Modifier.size(48.dp)
                         )
                     }
-                } else if (state.status != PlaybackStatus.BUFFERING) {
-                    IconButton(
-                        onClick = onTogglePlayPause,
-                        modifier = Modifier.size(60.dp).testTag("play_pause_button")
-                    ) {
-                        Icon(
-                            imageVector = if (state.status == PlaybackStatus.PLAYING) {
-                                Icons.Default.Pause
-                            } else {
-                                Icons.Default.PlayArrow
-                            },
-                            contentDescription = "Play or Pause",
-                            tint = Color.White,
-                            modifier = Modifier.size(46.dp)
-                        )
+                } else {
+                    CenterSeekButton(
+                        isForward = false,
+                        enabled = state.durationMs > 0L,
+                        onClick = { onSeekStep(false) },
+                        pulseActive = doubleTapSeekState.isVisible && !doubleTapSeekState.isForward
+                    )
+
+                    if (state.status != PlaybackStatus.BUFFERING) {
+                        IconButton(
+                            onClick = onTogglePlayPause,
+                            modifier = Modifier.size(68.dp).testTag("play_pause_button")
+                        ) {
+                            Crossfade(
+                                targetState = state.status == PlaybackStatus.PLAYING,
+                                animationSpec = tween(durationMillis = 160),
+                                label = "play_pause_transition"
+                            ) { isPlaying ->
+                                Icon(
+                                    painter = painterResource(
+                                        if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
+                                    ),
+                                    contentDescription = if (isPlaying) "Pause" else "Play",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(64.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.size(68.dp))
                     }
+
+                    CenterSeekButton(
+                        isForward = true,
+                        enabled = state.durationMs > 0L,
+                        onClick = { onSeekStep(true) },
+                        pulseActive = doubleTapSeekState.isVisible && doubleTapSeekState.isForward
+                    )
                 }
             }
 
-            // Bottom Bar with soft shadow gradient anchored to bottom & SleekSeekBar
+            // Bottom transport and centered action buttons with comfortable inset.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
+                    .graphicsLayer {
+                        alpha = hudProgress
+                        translationY = 48f * (1f - hudProgress)
+                    }
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -501,78 +480,120 @@ fun PlayerControls(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                        .padding(bottom = 14.dp)
+                        .padding(start = 14.dp, end = 14.dp, top = 8.dp)
+                        .padding(bottom = if (isLandscape) 18.dp else 26.dp)
                 ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = formatTimestamp(state.positionMs),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    SleekSeekBar(
-                        positionMs = state.positionMs,
-                        durationMs = state.durationMs,
-                        onSeek = onSeek,
-                        onScrubbingChange = onScrubbingChange,
-                        onPreviewSeek = onPreviewSeek,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    Text(
-                        text = formatTimestamp(state.durationMs),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Speed button
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .clickable { onSetActiveMenu("speed") }
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
-                            .testTag("speed_button")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${state.speed}x",
+                            text = formatTimestamp(state.positionMs),
                             color = Color.White,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Medium
                         )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        SleekSeekBar(
+                            positionMs = state.positionMs,
+                            durationMs = state.durationMs,
+                            onSeek = onSeek,
+                            onScrubbingChange = onScrubbingChange,
+                            onPreviewSeek = onPreviewSeek,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Text(
+                            text = formatTimestamp(state.durationMs),
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        if (!isLandscape) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            IconButton(
+                                onClick = onToggleOrientation,
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("fullscreen_toggle_button")
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_fullscreen_enter),
+                                    contentDescription = "Enter Fullscreen",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(23.dp)
+                                )
+                            }
+                        }
                     }
 
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // Fullscreen enter/exit toggle button
-                    IconButton(
-                        onClick = onToggleOrientation,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .testTag("fullscreen_toggle_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isLandscape) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = if (isLandscape) "Exit Fullscreen" else "Enter Fullscreen",
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                        val compactButtons = maxWidth < 380.dp
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PlayerActionButton(
+                                iconRes = R.drawable.ic_audio,
+                                label = "Audio",
+                                contentDescription = "Audio Track",
+                                onClick = { onSetActiveMenu("audio") },
+                                compact = compactButtons,
+                                modifier = Modifier.testTag("audio_menu_button")
+                            )
+                            PlayerActionButton(
+                                iconRes = R.drawable.ic_captions,
+                                label = "Subtitles",
+                                contentDescription = "Subtitle Track",
+                                onClick = { onSetActiveMenu("subtitle") },
+                                isActive = state.selectedSubtitleTrackId != -1,
+                                compact = compactButtons,
+                                modifier = Modifier.testTag("subtitle_menu_button")
+                            )
+                            PlayerActionButton(
+                                iconRes = R.drawable.ic_speed,
+                                label = speedButtonLabel(state.speed),
+                                contentDescription = "Playback Speed",
+                                onClick = { onSetActiveMenu("speed") },
+                                isActive = state.speed != 1.0f,
+                                compact = compactButtons,
+                                modifier = Modifier.testTag("speed_button")
+                            )
+                            PlayerActionButton(
+                                iconRes = R.drawable.ic_aspect_ratio,
+                                label = state.aspectRatioMode.label,
+                                contentDescription = "Aspect Ratio",
+                                onClick = {
+                                    val modes = AspectRatioMode.values()
+                                    val nextIndex = (state.aspectRatioMode.ordinal + 1) % modes.size
+                                    val nextMode = modes[nextIndex]
+                                    onCycleAspectRatio()
+                                    aspectToastText = nextMode.label
+                                    coroutineScope.launch {
+                                        delay(1200)
+                                        if (aspectToastText == nextMode.label) {
+                                            aspectToastText = null
+                                        }
+                                    }
+                                },
+                                onLongClick = { onSetActiveMenu("aspect") },
+                                isActive = state.aspectRatioMode != AspectRatioMode.FIT,
+                                compact = compactButtons,
+                                modifier = Modifier.testTag("aspect_ratio_button")
+                            )
+                        }
                     }
                 }
             }
         }
-    }
 
         // Gesture slide-seek overlay is shown at the bottom only when HUD is hidden
         if (state.slideSeekState.isActive && activeMenu == null && !isHudVisible) {
@@ -598,8 +619,8 @@ fun PlayerControls(
                     colorStops = arrayOf(
                         0.0f to Color.Transparent,
                         0.46f to Color.Transparent,
-                        0.58f to Color(0xAA000000),
-                        1.0f to Color(0xAA000000)
+                        0.58f to Color(0x99000000),
+                        1.0f to Color(0x99000000)
                     )
                 )
             } else {
@@ -607,8 +628,8 @@ fun PlayerControls(
                     colorStops = arrayOf(
                         0.0f to Color.Transparent,
                         0.20f to Color.Transparent,
-                        0.28f to Color(0xAA000000),
-                        1.0f to Color(0xAA000000)
+                        0.28f to Color(0x99000000),
+                        1.0f to Color(0x99000000)
                     )
                 )
             }
@@ -626,8 +647,14 @@ fun PlayerControls(
 
         AnimatedVisibility(
             visible = activeMenu != null,
-            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
-            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+            enter = slideInHorizontally(
+                animationSpec = tween(220, easing = FastOutSlowInEasing),
+                initialOffsetX = { it }
+            ),
+            exit = slideOutHorizontally(
+                animationSpec = tween(220, easing = FastOutSlowInEasing),
+                targetOffsetX = { it }
+            ),
             modifier = Modifier.align(if (isLandscape) Alignment.CenterEnd else Alignment.BottomCenter)
         ) {
             val menuModifier = if (isLandscape) {
@@ -651,23 +678,41 @@ fun PlayerControls(
                 when (activeMenu) {
                     "subtitle" -> SubtitleSideMenu(
                         state = state,
-                        onSelectSubtitle = onSelectSubtitle,
+                        onSelectSubtitle = { trackId ->
+                            onSelectSubtitle(trackId)
+                            onSetActiveMenu(null)
+                        },
                         onSubDelayAdjust = onSubDelayAdjust,
-                        onPickSubtitle = onPickSubtitle
+                        onPickSubtitle = {
+                            onPickSubtitle()
+                            onSetActiveMenu(null)
+                        }
                     )
                     "audio" -> AudioSideMenu(
                         state = state,
-                        onSelectAudio = onSelectAudio,
+                        onSelectAudio = { trackId ->
+                            onSelectAudio(trackId)
+                            onSetActiveMenu(null)
+                        },
                         onAudioDelayAdjust = onAudioDelayAdjust,
-                        onPickAudio = onPickAudio
+                        onPickAudio = {
+                            onPickAudio()
+                            onSetActiveMenu(null)
+                        }
                     )
                     "aspect" -> AspectRatioSideMenu(
                         currentMode = state.aspectRatioMode,
-                        onSelectAspectRatio = onSelectAspectRatio
+                        onSelectAspectRatio = { mode ->
+                            onSelectAspectRatio(mode)
+                            onSetActiveMenu(null)
+                        }
                     )
                     "speed" -> SpeedSideMenu(
                         currentSpeed = state.speed,
-                        onSetSpeed = onSetSpeed
+                        onSetSpeed = { speed ->
+                            onSetSpeed(speed)
+                            onSetActiveMenu(null)
+                        }
                     )
                     "chapter" -> ChapterSideMenu(
                         chapters = state.chapters,
@@ -681,6 +726,165 @@ fun PlayerControls(
             }
         }
     }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PlayerActionButton(
+    iconRes: Int,
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
+    compact: Boolean = false,
+    isActive: Boolean = false
+) {
+    val contentColor = if (isActive) Color(0xFF64A8FF) else Color.White
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = if (compact) 6.dp else 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                painter = painterResource(iconRes),
+                contentDescription = contentDescription,
+                tint = contentColor,
+                modifier = Modifier.size(if (compact) 16.dp else 19.dp)
+            )
+            Spacer(modifier = Modifier.width(if (compact) 4.dp else 5.dp))
+            Text(
+                text = label,
+                color = contentColor,
+                fontSize = if (compact) 10.sp else 11.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun CenterSeekButton(
+    isForward: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    pulseActive: Boolean = false
+) {
+    val contentAlpha by animateFloatAsState(
+        targetValue = if (pulseActive) 0f else 1f,
+        animationSpec = tween(160),
+        label = if (isForward) "forward_pulse_crossfade" else "rewind_pulse_crossfade"
+    )
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier
+            .graphicsLayer { alpha = contentAlpha }
+            .size(64.dp)
+            .testTag(if (isForward) "forward_10_button" else "rewind_10_button")
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Default.Replay,
+                contentDescription = if (isForward) "Forward 10 seconds" else "Rewind 10 seconds",
+                tint = if (enabled) Color.White else Color(0x55FFFFFF),
+                modifier = Modifier
+                    .size(36.dp)
+                    .graphicsLayer { scaleX = if (isForward) -1f else 1f }
+            )
+            Text(
+                text = "10 sec",
+                color = if (enabled) Color(0xEEFFFFFF) else Color(0x55FFFFFF),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 11.sp
+            )
+        }
+    }
+}
+
+private fun speedButtonLabel(speed: Float): String {
+    if (kotlin.math.abs(speed - 1.0f) < 0.001f) return "Speed"
+    val value = String.format(Locale.US, "%.2f", speed)
+        .trimEnd('0')
+        .trimEnd('.')
+    return "${value}×"
+}
+
+@Composable
+private fun PlayerTitle(title: String) {
+    // Never derive styling from TextLayoutResult here: making the second line
+    // smaller changes the first line break, which then changes the styling
+    // again and causes visible title flicker. Split once from the source text.
+    val (firstLine, secondLine) = remember(title) { splitPlayerTitle(title) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = firstLine,
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            lineHeight = 19.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+        if (!secondLine.isNullOrEmpty()) {
+            Text(
+                text = secondLine,
+                color = Color(0x88FFFFFF),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Normal,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+private fun splitPlayerTitle(title: String): Pair<String, String?> {
+    val source = title.trim()
+    if (source.isEmpty()) return "Video" to null
+
+    val explicitBreak = source.indexOf('\n')
+    if (explicitBreak >= 0) {
+        return source.substring(0, explicitBreak).trim() to
+            source.substring(explicitBreak + 1).trim().takeIf { it.isNotEmpty() }
+    }
+    if (source.length <= 26) return source to null
+
+    val maximumFirstLine = 24
+    val minimumFirstLine = 12
+    val lastWordBreak = source.lastIndexOf(' ', maximumFirstLine)
+    val nextWordBreak = source.indexOf(' ', maximumFirstLine)
+    val breakAt = when {
+        lastWordBreak >= minimumFirstLine -> lastWordBreak
+        nextWordBreak in maximumFirstLine until source.length - 6 -> nextWordBreak
+        else -> maximumFirstLine
+    }
+
+    val first = source.substring(0, breakAt).trim()
+    val second = source.substring(breakAt).trim()
+    return first to second.takeIf { it.isNotEmpty() }
 }
 
 @Composable
@@ -902,97 +1106,76 @@ fun SleekSeekBar(
 }
 
 @Composable
-fun YouTubeSeekRippleOverlay(
+fun ClassicSeekPulseOverlay(
     state: DoubleTapSeekState,
     modifier: Modifier = Modifier
 ) {
-    if (!state.isVisible) return
+    val pulse = remember { Animatable(0f) }
+    LaunchedEffect(state.isVisible, state.isForward, state.seconds) {
+        if (state.isVisible) {
+            pulse.snapTo(0f)
+            pulse.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing)
+            )
+        }
+    }
 
-    val infiniteTransition = rememberInfiniteTransition(label = "chevrons")
-    val a1 by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 650
-                0.25f at 0
-                1f at 220
-                0.25f at 440
-            }
-        ),
-        label = "a1"
-    )
-    val a2 by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 650
-                0.25f at 110
-                1f at 330
-                0.25f at 550
-            }
-        ),
-        label = "a2"
-    )
-    val a3 by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = keyframes {
-                durationMillis = 650
-                0.25f at 220
-                1f at 440
-                0.25f at 650
-            }
-        ),
-        label = "a3"
-    )
-
-    Box(
-        modifier = modifier.fillMaxSize(),
-        contentAlignment = if (state.isForward) Alignment.CenterEnd else Alignment.CenterStart
-    ) {
-        Box(
+    val direction = if (state.isForward) 1f else -1f
+    Box(modifier = modifier.fillMaxSize()) {
+        AnimatedVisibility(
+            visible = state.isVisible,
             modifier = Modifier
-                .fillMaxHeight()
-                .fillMaxWidth(0.38f)
-                .background(
-                    Brush.horizontalGradient(
-                        if (state.isForward) listOf(Color.Transparent, Color(0x35FFFFFF))
-                        else listOf(Color(0x35FFFFFF), Color.Transparent)
-                    )
-                ),
-            contentAlignment = Alignment.Center
+                .align(Alignment.Center)
+                .offset(x = if (state.isForward) 96.dp else (-96).dp),
+            enter = fadeIn(animationSpec = tween(80)) +
+                scaleIn(initialScale = 0.86f, animationSpec = tween(100)),
+            exit = fadeOut(animationSpec = tween(160)) +
+                scaleOut(targetScale = 1.06f, animationSpec = tween(160))
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    modifier = Modifier.size(96.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (state.isForward) {
-                        Text("▶", color = Color.White.copy(alpha = a1), fontSize = 18.sp)
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text("▶", color = Color.White.copy(alpha = a2), fontSize = 18.sp)
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text("▶", color = Color.White.copy(alpha = a3), fontSize = 18.sp)
-                    } else {
-                        Text("◀", color = Color.White.copy(alpha = a3), fontSize = 18.sp)
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text("◀", color = Color.White.copy(alpha = a2), fontSize = 18.sp)
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text("◀", color = Color.White.copy(alpha = a1), fontSize = 18.sp)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val progress = pulse.value
+                        drawCircle(
+                            color = Color(0x38000000),
+                            radius = 30.dp.toPx()
+                        )
+                        if (progress < 1f) {
+                            drawCircle(
+                                color = Color(0xFF64A8FF).copy(alpha = (1f - progress) * 0.8f),
+                                radius = 30.dp.toPx() + (14.dp.toPx() * progress),
+                                style = Stroke(width = 2.dp.toPx())
+                            )
+                        }
                     }
+                    Icon(
+                        imageVector = Icons.Default.Replay,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .graphicsLayer {
+                                val wave = sin(pulse.value * PI).toFloat()
+                                val scale = 1f + (0.14f * wave)
+                                scaleX = -direction * scale
+                                scaleY = scale
+                                rotationZ = direction * 24f * wave
+                            }
+                    )
                 }
-                Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = if (state.isForward) "+${state.seconds} seconds" else "${state.seconds} seconds",
+                    text = if (state.isForward) "+${state.seconds}s" else "−${state.seconds}s",
                     color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.graphicsLayer {
+                        translationX = direction * 18f * pulse.value
+                        alpha = 1f - (0.2f * pulse.value)
+                    }
                 )
             }
         }
@@ -1026,7 +1209,7 @@ fun VolumeGesturePill(
                 horizontalArrangement = Arrangement.Center
             ) {
                 Icon(
-                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                    painter = painterResource(R.drawable.ic_audio),
                     contentDescription = null,
                     tint = if (isBoost) Color(0xFFFF5722) else Color(0xFF2979FF),
                     modifier = Modifier.size(20.dp)
@@ -1076,7 +1259,7 @@ fun VolumeGesturePill(
                 verticalArrangement = Arrangement.Center
             ) {
                 Icon(
-                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                    painter = painterResource(R.drawable.ic_audio),
                     contentDescription = null,
                     tint = if (isBoost) Color(0xFFFF5722) else Color(0xFF2979FF),
                     modifier = Modifier.size(20.dp)
@@ -1139,7 +1322,7 @@ fun BrightnessGesturePill(
                 Icon(
                     imageVector = Icons.Default.BrightnessMedium,
                     contentDescription = null,
-                    tint = Color(0xFFFFD54F),
+                    tint = Color(0xFF2979FF),
                     modifier = Modifier.size(20.dp)
                 )
 
@@ -1156,7 +1339,7 @@ fun BrightnessGesturePill(
                         modifier = Modifier
                             .fillMaxHeight()
                             .fillMaxWidth(progress.coerceIn(0f, 1f))
-                            .background(Color(0xFFFFD54F))
+                            .background(Color(0xFF2979FF))
                     )
                 }
 
@@ -1188,7 +1371,7 @@ fun BrightnessGesturePill(
                 Icon(
                     imageVector = Icons.Default.BrightnessMedium,
                     contentDescription = null,
-                    tint = Color(0xFFFFD54F),
+                    tint = Color(0xFF2979FF),
                     modifier = Modifier.size(20.dp)
                 )
 
@@ -1206,7 +1389,7 @@ fun BrightnessGesturePill(
                             .fillMaxWidth()
                             .fillMaxHeight(progress.coerceIn(0f, 1f))
                             .align(Alignment.BottomCenter)
-                            .background(Color(0xFFFFD54F))
+                            .background(Color(0xFF2979FF))
                     )
                 }
 
@@ -1723,7 +1906,7 @@ fun ChapterSideMenu(
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(chapters) { ch ->
-                        val isCurrent = currentPositionMs in ch.startMs..ch.endMs
+                        val isCurrent = currentPositionMs >= ch.startMs && currentPositionMs < ch.endMs
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1735,7 +1918,7 @@ fun ChapterSideMenu(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = ch.title,
-                                    color = Color(0xFF2979FF),
+                                    color = if (isCurrent) Color(0xFF2979FF) else Color(0xEEFFFFFF),
                                     fontSize = 14.sp,
                                     fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
                                     maxLines = 1,

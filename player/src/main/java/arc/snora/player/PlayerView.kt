@@ -79,9 +79,10 @@ fun PlayerView(
         }
     }
 
-    DisposableEffect(controller.player) {
+    DisposableEffect(controller.player, activity) {
+        controller.onPlayerViewCreated(activity)
         onDispose {
-            controller.player.pause()
+            controller.onPlayerViewDisposed(activity)
             controller.player.detachSurface()
         }
     }
@@ -108,8 +109,9 @@ fun PlayerView(
                 if (!playbackState.isControlsLocked && activeMenu == null) {
                     var dragMode = 0 // 0: None, 1: Horizontal Slide Seek, 2: Vertical Gesture
                     var slideStartPosMs = 0L
+                    var slideDurationMs = 0L
                     var slideDragDistanceX = 0f
-                    val totalDuration = playbackState.durationMs.coerceAtLeast(1L)
+                    var slideDragDistanceY = 0f
 
                     detectDragGestures(
                         onDragStart = {
@@ -123,7 +125,7 @@ fun PlayerView(
                         },
                         onDragCancel = {
                             if (dragMode == 1) {
-                                controller.onSlideSeekEnd()
+                                controller.onSlideSeekCancel()
                             }
                             dragMode = 0
                         },
@@ -131,8 +133,11 @@ fun PlayerView(
                             if (dragMode == 0) {
                                 if (abs(dragAmount.x) > abs(dragAmount.y) * 1.1f && abs(dragAmount.x) > 6f) {
                                     dragMode = 1
-                                    slideStartPosMs = playbackState.positionMs
+                                    val latest = controller.player.playbackState.value
+                                    slideStartPosMs = latest.positionMs
+                                    slideDurationMs = latest.durationMs
                                     slideDragDistanceX = 0f
+                                    slideDragDistanceY = 0f
                                     controller.onSlideSeekStart()
                                 } else if (abs(dragAmount.y) > abs(dragAmount.x) * 1.1f && abs(dragAmount.y) > 6f) {
                                     dragMode = 2
@@ -142,9 +147,20 @@ fun PlayerView(
                             if (dragMode == 1) {
                                 change.consume()
                                 slideDragDistanceX += dragAmount.x
-                                val deltaMs = ((slideDragDistanceX / size.width.toFloat()) * 60_000f).toLong()
-                                val targetMs = (slideStartPosMs + deltaMs).coerceIn(0L, totalDuration)
-                                val fraction = (targetMs.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f)
+                                slideDragDistanceY += dragAmount.y
+                                val targetMs = SlideSeekMath.calculateTargetMs(
+                                    startPositionMs = slideStartPosMs,
+                                    durationMs = slideDurationMs,
+                                    horizontalDistancePx = slideDragDistanceX,
+                                    verticalDistancePx = slideDragDistanceY,
+                                    viewportHeightPx = size.height.toFloat(),
+                                    xDpi = context.resources.displayMetrics.xdpi
+                                )
+                                val fraction = if (slideDurationMs > 0L) {
+                                    (targetMs.toDouble() / slideDurationMs.toDouble()).toFloat().coerceIn(0f, 1f)
+                                } else {
+                                    0f
+                                }
                                 controller.onSlideSeek(targetMs, fraction)
                             } else if (dragMode == 2) {
                                 change.consume()
@@ -211,6 +227,7 @@ fun PlayerView(
             onTogglePlayPause = { controller.player.togglePlayPause() },
             onSeek = { targetMs -> controller.player.seekTo(targetMs) },
             onSeekRelative = { deltaSec -> controller.player.seekRelative(deltaSec) },
+            onSeekStep = { isForward -> controller.onDoubleTapSeek(isForward) },
             onSetSpeed = { speed -> controller.player.setSpeed(speed) },
             onSelectAspectRatio = { mode -> controller.player.videoRenderer.setAspectRatioMode(mode) },
             onCycleAspectRatio = { controller.player.videoRenderer.cycleAspectRatioMode() },
