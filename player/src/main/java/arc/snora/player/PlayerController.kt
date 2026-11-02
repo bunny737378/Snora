@@ -54,6 +54,7 @@ class PlayerController(
     private var autoHideJob: Job? = null
     private var gestureHideJob: Job? = null
     private var doubleTapJob: Job? = null
+    private var timelinePreviewJob: Job? = null
     private var isScrubbing: Boolean = false
 
     private var accumulatedVolumeDelta: Float = 0f
@@ -64,6 +65,7 @@ class PlayerController(
 
     fun setScrubbing(scrubbing: Boolean) {
         isScrubbing = scrubbing
+        player.updateState { it.copy(isScrubbing = scrubbing) }
         if (scrubbing) {
             autoHideJob?.cancel()
             _isHudVisible.value = true
@@ -260,6 +262,35 @@ class PlayerController(
             _isHudVisible.value = false
         } else {
             showHud()
+        }
+    }
+
+    /** Preview the shared cached thumbnail while scrubbing/tapping the standard seek bar. */
+    fun onTimelinePreview(targetMs: Long, fraction: Float, active: Boolean) {
+        val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
+        val target = targetMs.coerceIn(0L, duration)
+        timelinePreviewJob?.cancel()
+        if (active) {
+            val isNewPreview = !player.playbackState.value.slideSeekState.isActive
+            if (isNewPreview) lastThumbnailRequestMs = -1L
+            player.updateState {
+                it.copy(slideSeekState = SlideSeekState(
+                    isActive = true,
+                    targetMs = target,
+                    seekFraction = fraction.coerceIn(0f, 1f),
+                    thumbnailBitmap = it.slideSeekState.thumbnailBitmap
+                ))
+            }
+            if (lastThumbnailRequestMs < 0L || kotlin.math.abs(target - lastThumbnailRequestMs) > 800L) {
+                requestThumbnail(target)
+            }
+        } else {
+            timelinePreviewJob = scope.launch {
+                delay(900)
+                if (!isScrubbing) {
+                    player.updateState { it.copy(slideSeekState = SlideSeekState(isActive = false)) }
+                }
+            }
         }
     }
 

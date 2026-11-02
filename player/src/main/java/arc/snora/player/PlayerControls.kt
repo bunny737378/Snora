@@ -58,6 +58,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -114,6 +115,7 @@ fun PlayerControls(
     onAudioDelayAdjust: (Double) -> Unit,
     onToggleHwDec: () -> Unit,
     onScrubbingChange: (Boolean) -> Unit,
+    onPreviewSeek: (Long, Float, Boolean) -> Unit = { _, _, _ -> },
     onPickSubtitle: () -> Unit,
     onPickAudio: () -> Unit,
     onToggleOrientation: () -> Unit = {},
@@ -199,36 +201,42 @@ fun PlayerControls(
             }
         }
 
-        // Locked state
-        if (state.isControlsLocked) {
-            if (isHudVisible) {
-                IconButton(
-                    onClick = onToggleLock,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(20.dp)
-                        .size(46.dp)
-                        .background(Color(0x99000000), CircleShape)
-                        .testTag("unlock_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = "Unlock Controls",
-                        tint = Color(0xFF2979FF)
-                    )
-                }
+        // Material 3 contained loading indicator for initial load and rebuffering.
+        if (state.status == PlaybackStatus.BUFFERING) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(64.dp)
+                    .background(Color(0xCC111317), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(34.dp),
+                    color = Color(0xFF80B5FF),
+                    trackColor = Color(0x553F4B5B),
+                    strokeWidth = 3.dp
+                )
             }
-            return@Box
         }
 
-        // Slide-to-Seek Real-time Floating Overlay & Timeline Thumb
-        if (state.slideSeekState.isActive) {
-            SlideSeekFloatingOverlay(
-                slideState = state.slideSeekState,
-                currentPosMs = state.positionMs,
-                durationMs = state.durationMs,
-                modifier = Modifier.fillMaxSize()
-            )
+        // Locked state
+        if (state.isControlsLocked) {
+            IconButton(
+                onClick = onToggleLock,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(20.dp)
+                    .size(46.dp)
+                    .background(Color(0x99000000), CircleShape)
+                    .testTag("unlock_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Unlock Controls",
+                    tint = Color(0xFF2979FF)
+                )
+            }
+            return@Box
         }
 
         // On-screen Aspect Ratio Toast Badge
@@ -251,7 +259,7 @@ fun PlayerControls(
         }
 
         // Normal HUD Controls
-        if (isHudVisible && activeMenu == null && !state.slideSeekState.isActive) {
+        if (isHudVisible && activeMenu == null) {
 
             // Top Bar with soft shadow gradient
             Row(
@@ -434,20 +442,22 @@ fun PlayerControls(
                 modifier = Modifier.align(Alignment.Center),
                 contentAlignment = Alignment.Center
             ) {
-                IconButton(
-                    onClick = onTogglePlayPause,
-                    modifier = Modifier.size(60.dp).testTag("play_pause_button")
-                ) {
-                    Icon(
-                        imageVector = if (state.status == PlaybackStatus.PLAYING) {
-                            Icons.Default.Pause
-                        } else {
-                            Icons.Default.PlayArrow
-                        },
-                        contentDescription = "Play or Pause",
-                        tint = Color.White,
-                        modifier = Modifier.size(46.dp)
-                    )
+                if (state.status != PlaybackStatus.BUFFERING) {
+                    IconButton(
+                        onClick = onTogglePlayPause,
+                        modifier = Modifier.size(60.dp).testTag("play_pause_button")
+                    ) {
+                        Icon(
+                            imageVector = if (state.status == PlaybackStatus.PLAYING) {
+                                Icons.Default.Pause
+                            } else {
+                                Icons.Default.PlayArrow
+                            },
+                            contentDescription = "Play or Pause",
+                            tint = Color.White,
+                            modifier = Modifier.size(46.dp)
+                        )
+                    }
                 }
             }
 
@@ -456,6 +466,7 @@ fun PlayerControls(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
+                    .padding(bottom = 14.dp)
                     .background(
                         Brush.verticalGradient(
                             listOf(
@@ -485,6 +496,7 @@ fun PlayerControls(
                         durationMs = state.durationMs,
                         onSeek = onSeek,
                         onScrubbingChange = onScrubbingChange,
+                        onPreviewSeek = onPreviewSeek,
                         modifier = Modifier.weight(1f)
                     )
 
@@ -535,6 +547,17 @@ fun PlayerControls(
             }
         }
 
+        // Shared preview overlay is used by both full-screen slide-seek and the standard seek bar.
+        if (state.slideSeekState.isActive && activeMenu == null) {
+            SlideSeekFloatingOverlay(
+                slideState = state.slideSeekState,
+                currentPosMs = state.positionMs,
+                durationMs = state.durationMs,
+                showTimeline = !isHudVisible,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
         // Side Menus with soft gradient shadow background, pure transparent panel, animated slide in/out
         AnimatedVisibility(
             visible = activeMenu != null,
@@ -550,9 +573,9 @@ fun PlayerControls(
                             colorStops = arrayOf(
                                 0.0f to Color.Transparent,
                                 0.45f to Color.Transparent,
-                                0.7f to Color(0x35000000),
-                                0.88f to Color(0x66000000),
-                                1.0f to Color(0x99000000)
+                                0.7f to Color(0x44000000),
+                                0.88f to Color(0x77000000),
+                                1.0f to Color(0xB0000000)
                             )
                         )
                     )
@@ -576,7 +599,7 @@ fun PlayerControls(
             } else {
                 Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(0.6f)
+                    .fillMaxHeight(0.72f)
             }
 
             Box(
@@ -627,6 +650,7 @@ fun SlideSeekFloatingOverlay(
     slideState: SlideSeekState,
     currentPosMs: Long,
     durationMs: Long,
+    showTimeline: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier = modifier) {
@@ -643,7 +667,7 @@ fun SlideSeekFloatingOverlay(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .offset { IntOffset(xOffset.roundToPx(), 0) }
-                .padding(bottom = 36.dp),
+                .padding(bottom = if (showTimeline) 36.dp else 72.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // 16:9 Thumbnail Box in Crop mode
@@ -688,8 +712,8 @@ fun SlideSeekFloatingOverlay(
             }
         }
 
-        // Timeline bar at the bottom with played time on left, duration on right
-        Column(
+        // Gesture-seek mini timeline is shown only when the standard controls are hidden.
+        if (showTimeline) Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
@@ -749,7 +773,6 @@ fun SlideSeekFloatingOverlay(
                                 .size(14.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFF2979FF))
-                                .border(1.5.dp, Color.White, CircleShape)
                         )
                     }
                 }
@@ -773,6 +796,7 @@ fun SleekSeekBar(
     durationMs: Long,
     onSeek: (Long) -> Unit,
     onScrubbingChange: (Boolean) -> Unit,
+    onPreviewSeek: (Long, Float, Boolean) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var isDragging by remember { mutableStateOf(false) }
@@ -788,7 +812,10 @@ fun SleekSeekBar(
                 detectTapGestures(
                     onTap = { offset ->
                         val f = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                        onSeek((f * safeDuration).toLong())
+                        val target = (f * safeDuration).toLong()
+                        onPreviewSeek(target, f, true)
+                        onSeek(target)
+                        onPreviewSeek(target, f, false)
                     }
                 )
             }
@@ -798,19 +825,25 @@ fun SleekSeekBar(
                         isDragging = true
                         dragFraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
                         onScrubbingChange(true)
+                        onPreviewSeek((dragFraction * safeDuration).toLong(), dragFraction, true)
                     },
                     onDragEnd = {
                         isDragging = false
+                        val target = (dragFraction * safeDuration).toLong()
+                        onPreviewSeek(target, dragFraction, false)
                         onScrubbingChange(false)
-                        onSeek((dragFraction * safeDuration).toLong())
+                        onSeek(target)
                     },
                     onDragCancel = {
                         isDragging = false
+                        val target = (dragFraction * safeDuration).toLong()
+                        onPreviewSeek(target, dragFraction, false)
                         onScrubbingChange(false)
                     },
                     onHorizontalDrag = { change, _ ->
                         change.consume()
                         dragFraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        onPreviewSeek((dragFraction * safeDuration).toLong(), dragFraction, true)
                     }
                 )
             },
@@ -846,7 +879,6 @@ fun SleekSeekBar(
                 .size(13.dp)
                 .clip(CircleShape)
                 .background(Color(0xFF2979FF))
-                .border(1.5.dp, Color.White, CircleShape)
         )
     }
 }
@@ -1282,18 +1314,6 @@ fun SubtitleSideMenu(
                     }
                 }
             }
-
-            // Soft fading shadow at the top of the list so items don't have a harsh cut
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0x77000000), Color.Transparent)
-                        )
-                    )
-            )
         }
 
         Box(
@@ -1465,18 +1485,6 @@ fun AudioSideMenu(
                     }
                 }
             }
-
-            // Soft fading shadow at the top of the list so items don't have a harsh cut
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0x77000000), Color.Transparent)
-                        )
-                    )
-            )
         }
 
         Box(
@@ -1597,18 +1605,6 @@ fun AspectRatioSideMenu(
                     }
                 }
             }
-
-            // Soft fading shadow at the top of the list so items don't have a harsh cut
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0x77000000), Color.Transparent)
-                        )
-                    )
-            )
         }
     }
 }
@@ -1670,18 +1666,6 @@ fun SpeedSideMenu(
                     }
                 }
             }
-
-            // Soft fading shadow at the top of the list so items don't have a harsh cut
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0x77000000), Color.Transparent)
-                        )
-                    )
-            )
         }
     }
 }
@@ -1733,7 +1717,7 @@ fun ChapterSideMenu(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = ch.title,
-                                    color = Color.White,
+                                    color = Color(0xFF2979FF),
                                     fontSize = 14.sp,
                                     fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
                                     maxLines = 1,
@@ -1757,18 +1741,6 @@ fun ChapterSideMenu(
                         }
                     }
                 }
-
-                // Soft fading shadow at the top of the list so items don't have a harsh cut
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(14.dp)
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color(0x77000000), Color.Transparent)
-                            )
-                        )
-                )
             }
         }
     }
