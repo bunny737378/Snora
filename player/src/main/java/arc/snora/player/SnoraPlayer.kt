@@ -31,8 +31,11 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
     private var currentSurface: Surface? = null
+    private var isSurfaceAttached: Boolean = false
     private var progressJob: Job? = null
     private var currentPathOrUri: String = ""
+    private var pendingStartPositionMs: Long = 0L
+    private var needsFileLoad: Boolean = false
     private var isMpvInitialized: Boolean = false
     private var isMpvPlaying: Boolean = false
     private var voInUse: String = "gpu"
@@ -204,17 +207,25 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     fun attachSurface(surface: Surface) {
+        if (isSurfaceAttached && currentSurface === surface) {
+            loadPendingMediaIfReady()
+            return
+        }
+
         currentSurface = surface
         try {
             ensureMpvCreated()
+
+            // mpv must receive the new Android window before its video output is
+            // re-enabled. Doing this in the opposite order can leave mpv rendering
+            // to the previous, already destroyed surface (audio keeps playing).
+            MPVLib.attachSurface(surface)
+            isSurfaceAttached = true
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", voInUse)
-            MPVLib.attachSurface(surface)
             MPVLib.setPropertyString("vid", "auto")
 
-            if (currentPathOrUri.isNotEmpty() && !isMpvPlaying) {
-                playMedia(currentPathOrUri, 0L)
-            }
+            loadPendingMediaIfReady()
         } catch (t: Throwable) {
         }
     }
@@ -228,28 +239,33 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     fun detachSurface() {
         currentSurface = null
+        if (!isSurfaceAttached) return
+        isSurfaceAttached = false
+
         try {
-            MPVLib.detachSurface()
+            // Tear down the video output before releasing the Surface global ref.
+            // SurfaceView and DisposableEffect can both report the same teardown,
+            // so the guard above deliberately makes this operation idempotent.
+            MPVLib.setPropertyString("vo", "null")
+            MPVLib.setPropertyString("force-window", "no")
         } catch (t: Throwable) {
+        } finally {
+            try {
+                MPVLib.detachSurface()
+            } catch (t: Throwable) {
+            }
         }
     }
 
     fun playMedia(pathOrUri: String, startPositionMs: Long = 0L) {
         currentPathOrUri = pathOrUri
+        pendingStartPositionMs = startPositionMs.coerceAtLeast(0L)
+        needsFileLoad = true
         thumbnailLoader.setDataSource(pathOrUri)
         ensureMpvCreated()
         requestAudioFocus()
 
         isMpvPlaying = true
-        currentSurface?.let {
-            try {
-                MPVLib.attachSurface(it)
-                MPVLib.setOptionString("force-window", "yes")
-                MPVLib.setPropertyString("vo", voInUse)
-            } catch (t: Throwable) {
-            }
-        }
-
         isBuffering = true
         timelinePreparedForMs = 0L
         _playbackState.value = _playbackState.value.copy(
@@ -259,8 +275,24 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         )
         updateMediaSessionState()
 
+        // A tap normally happens before Compose has created the SurfaceView.
+        // Keep the request pending instead of starting an audio-only mpv file with
+        // no window. surfaceCreated() will call this once the window is valid.
+        loadPendingMediaIfReady()
+    }
+
+    private fun loadPendingMediaIfReady() {
+        if (!needsFileLoad || !isMpvPlaying || !isSurfaceAttached) return
+        if (currentSurface?.isValid != true || currentPathOrUri.isEmpty()) return
+
+        needsFileLoad = false
         try {
-            MPVLib.command(arrayOf("loadfile", pathOrUri))
+            MPVLib.command(arrayOf("loadfile", currentPathOrUri))
+            if (pendingStartPositionMs > 0L) {
+                MPVLib.command(
+                    arrayOf("seek", (pendingStartPositionMs / 1000.0).toString(), "absolute")
+                )
+            }
             MPVLib.setPropertyBoolean("pause", false)
         } catch (t: Throwable) {
             isBuffering = false
@@ -269,11 +301,14 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                 errorMessage = t.localizedMessage ?: "Failed to open video"
             )
             updateMediaSessionState()
+            return
         }
 
         startMpvProgressTracker()
 
-        playerScope.launch {
+        // Track enumeration performs many synchronous JNI property reads. Keep it
+        // off the UI thread so the newly opened player does not appear frozen.
+        playerScope.launch(Dispatchers.IO) {
             delay(400)
             refreshTracks()
             delay(800)
@@ -369,7 +404,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
 
     private fun startMpvProgressTracker() {
         progressJob?.cancel()
-        progressJob = playerScope.launch {
+        progressJob = playerScope.launch(Dispatchers.IO) {
             while (isActive && isMpvPlaying) {
                 try {
                     val timePosSec = MPVLib.getPropertyDouble("time-pos") ?: 0.0
@@ -742,6 +777,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     fun destroy() {
         progressJob?.cancel()
         isMpvPlaying = false
+        needsFileLoad = false
         isBuffering = false
         abandonAudioFocus()
         try {
@@ -762,6 +798,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         } catch (t: Throwable) {
         }
         currentSurface = null
+        isSurfaceAttached = false
         _playbackState.value = PlaybackState(status = PlaybackStatus.IDLE)
     }
 }
