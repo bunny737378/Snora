@@ -109,6 +109,7 @@ fun PlayerView(
                 if (!playbackState.isControlsLocked && activeMenu == null) {
                     var dragMode = 0 // 0: None, 1: Horizontal Slide Seek, 2: Vertical Gesture
                     var slideStartPosMs = 0L
+                    var slidePreviewStartPosMs = 0L
                     var slideDurationMs = 0L
                     var slideDragDistanceX = 0f
                     var slideDragDistanceY = 0f
@@ -116,10 +117,25 @@ fun PlayerView(
                     detectDragGestures(
                         onDragStart = {
                             dragMode = 0
+                            slideDragDistanceX = 0f
+                            slideDragDistanceY = 0f
+                            val latest = controller.player.playbackState.value
+                            slideStartPosMs = latest.positionMs
+                            slidePreviewStartPosMs = SlideSeekMath.previewStartPositionMs(
+                                slideStartPosMs
+                            )
+                            slideDurationMs = latest.durationMs
                         },
                         onDragEnd = {
                             if (dragMode == 1) {
-                                controller.onSlideSeekEnd()
+                                // Cloudstream recalculates from the original start on release.
+                                val finalTargetMs = SlideSeekMath.calculateTargetMs(
+                                    startPositionMs = slideStartPosMs,
+                                    durationMs = slideDurationMs,
+                                    horizontalDistancePx = slideDragDistanceX,
+                                    viewportWidthPx = size.width.toFloat()
+                                )
+                                controller.onSlideSeekEnd(finalTargetMs)
                             }
                             dragMode = 0
                         },
@@ -130,31 +146,33 @@ fun PlayerView(
                             dragMode = 0
                         },
                         onDrag = { change, dragAmount ->
+                            var startedSlideOnThisEvent = false
                             if (dragMode == 0) {
-                                if (abs(dragAmount.x) > abs(dragAmount.y) * 1.1f && abs(dragAmount.x) > 6f) {
+                                slideDragDistanceX += dragAmount.x
+                                slideDragDistanceY += dragAmount.y
+                                if (abs(slideDragDistanceX) > abs(slideDragDistanceY) * 1.1f &&
+                                    abs(slideDragDistanceX) > 6f
+                                ) {
                                     dragMode = 1
-                                    val latest = controller.player.playbackState.value
-                                    slideStartPosMs = latest.positionMs
-                                    slideDurationMs = latest.durationMs
-                                    slideDragDistanceX = 0f
-                                    slideDragDistanceY = 0f
-                                    controller.onSlideSeekStart()
-                                } else if (abs(dragAmount.y) > abs(dragAmount.x) * 1.1f && abs(dragAmount.y) > 6f) {
+                                    startedSlideOnThisEvent = true
+                                    controller.onSlideSeekStart(slideStartPosMs)
+                                } else if (abs(slideDragDistanceY) > abs(slideDragDistanceX) * 1.1f &&
+                                    abs(slideDragDistanceY) > 6f
+                                ) {
                                     dragMode = 2
                                 }
                             }
 
                             if (dragMode == 1) {
                                 change.consume()
-                                slideDragDistanceX += dragAmount.x
-                                slideDragDistanceY += dragAmount.y
+                                if (!startedSlideOnThisEvent) {
+                                    slideDragDistanceX += dragAmount.x
+                                }
                                 val targetMs = SlideSeekMath.calculateTargetMs(
-                                    startPositionMs = slideStartPosMs,
+                                    startPositionMs = slidePreviewStartPosMs,
                                     durationMs = slideDurationMs,
                                     horizontalDistancePx = slideDragDistanceX,
-                                    verticalDistancePx = slideDragDistanceY,
-                                    viewportHeightPx = size.height.toFloat(),
-                                    xDpi = context.resources.displayMetrics.xdpi
+                                    viewportWidthPx = size.width.toFloat()
                                 )
                                 val fraction = if (slideDurationMs > 0L) {
                                     (targetMs.toDouble() / slideDurationMs.toDouble()).toFloat().coerceIn(0f, 1f)

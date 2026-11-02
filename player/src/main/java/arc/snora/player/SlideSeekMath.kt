@@ -2,53 +2,54 @@ package arc.snora.player
 
 import kotlin.math.abs
 import kotlin.math.min
-import kotlin.math.pow
-import kotlin.math.roundToInt
-import kotlin.math.sign
 
-/** VLC-style relative swipe seeking with a stable, forced preview position. */
+/**
+ * Cloudstream-compatible relative slide seeking.
+ *
+ * Adapted from recloudstream/cloudstream's PlayerGestureHelper (GPL-3.0):
+ * horizontal travel is normalized by screen width, doubled, then applied as a
+ * signed quadratic fraction of the media duration. Vertical drift and physical
+ * DPI deliberately do not participate.
+ *
+ * SNORA retains a small end-of-file guard to avoid an END event followed by a
+ * position reset when a long swipe lands exactly on the media duration.
+ */
 object SlideSeekMath {
-
-    private const val BASE_JUMP_MS = 3_000.0
-    private const val MAX_JUMP_MS = 600_000.0
-    private const val MIN_TRAVEL_CM = 1.0
+    const val MINIMUM_SEEK_DELTA_MS = 7_000L
+    private const val HORIZONTAL_MULTIPLIER = 2.0
 
     fun calculateTargetMs(
         startPositionMs: Long,
         durationMs: Long,
         horizontalDistancePx: Float,
-        verticalDistancePx: Float,
-        viewportHeightPx: Float,
-        xDpi: Float
+        viewportWidthPx: Float
     ): Long {
-        if (durationMs <= 0L || !horizontalDistancePx.isFinite()) {
+        if (durationMs <= 0L ||
+            !horizontalDistancePx.isFinite() ||
+            !viewportWidthPx.isFinite() ||
+            viewportWidthPx <= 0f
+        ) {
             return startPositionMs.coerceAtLeast(0L)
         }
 
-        val safeDpi = if (xDpi.isFinite() && xDpi > 0f) xDpi else 160f
-        val distanceCm = horizontalDistancePx / safeDpi * 2.54f
-        if (abs(distanceCm) < MIN_TRAVEL_CM) {
-            return clampBeforeEof(startPositionMs, durationMs)
-        }
+        val diffX = horizontalDistancePx.toDouble() * HORIZONTAL_MULTIPLIER /
+            viewportWidthPx.toDouble()
+        val direction = if (diffX < 0.0) -1.0 else 1.0
+        val deltaMs = (durationMs.toDouble() * diffX * diffX * direction).toLong()
+        return clampBeforeEof(startPositionMs + deltaMs, durationMs)
+    }
 
-        // VLC damps horizontal seeking when the finger also drifts vertically.
-        val verticalSegmentPx = (viewportHeightPx / 32f).coerceAtLeast(1f)
-        val verticalCoefficient = (abs(verticalDistancePx) / verticalSegmentPx)
-            .roundToInt()
-            .coerceAtLeast(1)
+    /** Cloudstream rounds only the dragging preview start down to whole seconds. */
+    fun previewStartPositionMs(positionMs: Long): Long {
+        return positionMs.coerceAtLeast(0L) / 1_000L * 1_000L
+    }
 
-        val distanceTerm = (distanceCm.toDouble() / 8.0).pow(4.0)
-        val jumpMagnitude = (BASE_JUMP_MS + MAX_JUMP_MS * distanceTerm) / verticalCoefficient
-        val jumpMs = (sign(distanceCm.toDouble()) * jumpMagnitude)
-            .coerceIn(-MAX_JUMP_MS, MAX_JUMP_MS)
-            .toLong()
-
-        return clampBeforeEof(startPositionMs + jumpMs, durationMs)
+    /** The real seek is release-only and strictly greater than Cloudstream's 7 s minimum. */
+    fun shouldSeekOnRelease(startPositionMs: Long, targetPositionMs: Long): Boolean {
+        return abs(targetPositionMs - startPositionMs) > MINIMUM_SEEK_DELTA_MS
     }
 
     private fun clampBeforeEof(positionMs: Long, durationMs: Long): Long {
-        // Landing exactly on EOF can produce an END event followed by a position
-        // reset. Keep a small guard, proportional for short clips.
         val endGuardMs = min(1_000L, durationMs / 20L)
         val latestTargetMs = (durationMs - endGuardMs).coerceAtLeast(0L)
         return positionMs.coerceIn(0L, latestTargetMs)

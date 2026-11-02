@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -41,7 +42,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -68,12 +70,18 @@ fun SubtitleSettingsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val configuration = LocalConfiguration.current
-    val longSide = maxOf(configuration.screenWidthDp, configuration.screenHeightDp).coerceAtLeast(1)
-    val shortSide = minOf(configuration.screenWidthDp, configuration.screenHeightDp).coerceAtLeast(1)
-    // The dummy device always represents landscape playback, even when this
-    // settings page itself is being viewed in portrait.
-    val previewAspectRatio = (longSide.toFloat() / shortSide.toFloat()).coerceIn(1.3f, 2.4f)
+    val displayMetrics = LocalContext.current.resources.displayMetrics
+    val landscapeWidthPx = maxOf(
+        displayMetrics.widthPixels,
+        displayMetrics.heightPixels
+    ).coerceAtLeast(1).toFloat()
+    val landscapeHeightPx = minOf(
+        displayMetrics.widthPixels,
+        displayMetrics.heightPixels
+    ).coerceAtLeast(1).toFloat()
+    // The dummy device always represents this device's real landscape screen,
+    // even when the settings page itself is being viewed in portrait.
+    val previewAspectRatio = (landscapeWidthPx / landscapeHeightPx).coerceIn(1.3f, 2.4f)
 
     Column(
         modifier = modifier
@@ -118,7 +126,7 @@ fun SubtitleSettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(previewAspectRatio)
@@ -131,43 +139,48 @@ fun SubtitleSettingsScreen(
                     .border(1.dp, Color(0xFF35415A), RoundedCornerShape(22.dp))
                     .testTag("subtitle_dummy_screen")
             ) {
+                val density = LocalDensity.current
+                val previewWidthPx = with(density) { maxWidth.toPx() }
+                val previewScale = (previewWidthPx / landscapeWidthPx).coerceAtLeast(0.01f)
+
                 Text(
                     text = "VIDEO PREVIEW",
                     color = Color(0x22FFFFFF),
-                    fontSize = 13.sp,
+                    fontSize = (13f * previewScale).sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.sp,
+                    letterSpacing = (2f * previewScale).sp,
                     modifier = Modifier.align(Alignment.Center)
                 )
 
-                Box(
+                val alignment = BiasAlignment(
+                    horizontalBias = appearance.horizontalPosition * 2f - 1f,
+                    verticalBias = (1f - appearance.verticalPosition) * 2f - 1f
+                )
+                Text(
+                    text = "This is a sample subtitle\nIt updates as you move the sliders",
+                    color = Color(appearance.textColorArgb),
+                    fontSize = (appearance.fontSizeSp * previewScale).sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    lineHeight = ((appearance.fontSizeSp + 4f) * previewScale).sp,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(12.dp)
-                ) {
-                    val alignment = BiasAlignment(
-                        horizontalBias = appearance.horizontalPosition * 2f - 1f,
-                        verticalBias = (1f - appearance.verticalPosition) * 2f - 1f
-                    )
-                    Text(
-                        text = "This is a sample subtitle\nIt updates as you move the sliders",
-                        color = Color(appearance.textColorArgb),
-                        fontSize = appearance.fontSizeSp.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center,
-                        lineHeight = (appearance.fontSizeSp + 4f).sp,
-                        modifier = Modifier
-                            .align(alignment)
-                            .background(
-                                Color(appearance.backgroundColorArgb).copy(
-                                    alpha = appearance.backgroundOpacity
-                                ),
-                                RoundedCornerShape(6.dp)
-                            )
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                            .testTag("subtitle_live_preview")
-                    )
-                }
+                        .align(alignment)
+                        .padding(
+                            horizontal = 20.dp * previewScale,
+                            vertical = 20.dp * previewScale
+                        )
+                        .background(
+                            Color(appearance.backgroundColorArgb).copy(
+                                alpha = appearance.backgroundOpacity
+                            ),
+                            RoundedCornerShape(6.dp * previewScale)
+                        )
+                        .padding(
+                            horizontal = 14.dp * previewScale,
+                            vertical = 6.dp * previewScale
+                        )
+                        .testTag("subtitle_live_preview")
+                )
             }
 
             Text(

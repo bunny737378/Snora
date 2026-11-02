@@ -1,6 +1,7 @@
 package arc.snora.player
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -12,37 +13,27 @@ class SlideSeekMathTest {
             startPositionMs = 45_000L,
             durationMs = 0L,
             horizontalDistancePx = 200f,
-            verticalDistancePx = 0f,
-            viewportHeightPx = 800f,
-            xDpi = 160f
+            viewportWidthPx = 1_000f
         )
 
         assertEquals(45_000L, target)
     }
 
     @Test
-    fun subCentimeterTravelKeepsForcedPosition() {
-        val target = SlideSeekMath.calculateTargetMs(
-            startPositionMs = 45_000L,
-            durationMs = 600_000L,
-            horizontalDistancePx = 20f,
-            verticalDistancePx = 0f,
-            viewportHeightPx = 800f,
-            xDpi = 160f
-        )
+    fun cloudstreamQuadraticCurveIsSignedAndDurationBased() {
+        // diffX = 100 * 2 / 1000 = 0.2; delta = 600000 * 0.2² = 24000.
+        val forward = target(start = 100_000L, horizontalPx = 100f)
+        val backward = target(start = 100_000L, horizontalPx = -100f)
 
-        assertEquals(45_000L, target)
+        assertEquals(124_000L, forward)
+        assertEquals(76_000L, backward)
     }
 
     @Test
-    fun forwardAndBackwardJumpsAreRelativeToGestureStart() {
-        val forward = target(start = 100_000L, horizontalPx = 126f)
-        val backward = target(start = 100_000L, horizontalPx = -126f)
+    fun smallTravelStillUpdatesPreviewWithoutPhysicalDistanceThreshold() {
+        val target = target(start = 100_000L, horizontalPx = 10f)
 
-        assertTrue(forward > 100_000L)
-        assertTrue(backward < 100_000L)
-        assertTrue(forward - 100_000L < 10_000L)
-        assertTrue(100_000L - backward < 10_000L)
+        assertEquals(100_240L, target)
     }
 
     @Test
@@ -53,25 +44,28 @@ class SlideSeekMathTest {
     }
 
     @Test
-    fun verticalDriftDampsHorizontalJump() {
-        val straight = SlideSeekMath.calculateTargetMs(
-            startPositionMs = 100_000L,
+    fun previewStartIsRoundedDownToWholeSeconds() {
+        assertEquals(123_000L, SlideSeekMath.previewStartPositionMs(123_987L))
+        assertEquals(0L, SlideSeekMath.previewStartPositionMs(-10L))
+    }
+
+    @Test
+    fun releaseThresholdIsStrictlyGreaterThanSevenSeconds() {
+        assertFalse(SlideSeekMath.shouldSeekOnRelease(100_000L, 107_000L))
+        assertTrue(SlideSeekMath.shouldSeekOnRelease(100_000L, 107_001L))
+        assertTrue(SlideSeekMath.shouldSeekOnRelease(100_000L, 92_999L))
+    }
+
+    @Test
+    fun invalidViewportKeepsStartPosition() {
+        val target = SlideSeekMath.calculateTargetMs(
+            startPositionMs = 45_000L,
             durationMs = 600_000L,
             horizontalDistancePx = 200f,
-            verticalDistancePx = 0f,
-            viewportHeightPx = 800f,
-            xDpi = 160f
-        )
-        val diagonal = SlideSeekMath.calculateTargetMs(
-            startPositionMs = 100_000L,
-            durationMs = 600_000L,
-            horizontalDistancePx = 200f,
-            verticalDistancePx = 300f,
-            viewportHeightPx = 800f,
-            xDpi = 160f
+            viewportWidthPx = 0f
         )
 
-        assertTrue(diagonal < straight)
+        assertEquals(45_000L, target)
     }
 
     private fun target(start: Long, horizontalPx: Float): Long {
@@ -79,9 +73,7 @@ class SlideSeekMathTest {
             startPositionMs = start,
             durationMs = 600_000L,
             horizontalDistancePx = horizontalPx,
-            verticalDistancePx = 0f,
-            viewportHeightPx = 800f,
-            xDpi = 160f
+            viewportWidthPx = 1_000f
         )
     }
 }

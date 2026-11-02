@@ -3,7 +3,6 @@ package arc.snora.player
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
-import android.graphics.Bitmap
 import android.provider.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +16,6 @@ import kotlinx.coroutines.launch
 data class GestureOverlayState(
     val isVisible: Boolean = false,
     val iconType: GestureIconType = GestureIconType.NONE,
-    val text: String = "",
     val progress: Float = 0f,
     val volumeLevel: Int = 15,
     val isBoost: Boolean = false
@@ -32,8 +30,7 @@ data class DoubleTapSeekState(
 enum class GestureIconType {
     NONE,
     VOLUME,
-    BRIGHTNESS,
-    SEEK
+    BRIGHTNESS
 }
 
 class PlayerController(
@@ -236,7 +233,6 @@ class PlayerController(
     private fun showVolumeOverlay(volume: VolumeUiState) {
         showGestureOverlay(
             type = GestureIconType.VOLUME,
-            text = "${volume.percent}%",
             progress = volume.level.toFloat() / 30f,
             volLevel = volume.level,
             boost = volume.isBoost
@@ -258,11 +254,9 @@ class PlayerController(
             val lp = act.window.attributes
             lp.screenBrightness = target
             act.window.attributes = lp
-            val percentInt = (target * 100).toInt().coerceIn(1, 100)
 
             showGestureOverlay(
                 type = GestureIconType.BRIGHTNESS,
-                text = "$percentInt%",
                 progress = target,
                 volLevel = 0,
                 boost = false
@@ -273,25 +267,24 @@ class PlayerController(
     private fun dismissBrightnessImmediately() {
         if (_gestureState.value.iconType == GestureIconType.BRIGHTNESS) {
             gestureHideJob?.cancel()
-            _gestureState.value = GestureOverlayState(isVisible = false)
+            _gestureState.value = _gestureState.value.copy(isVisible = false)
         }
     }
 
     private fun dismissVolumeImmediately() {
         if (_gestureState.value.iconType == GestureIconType.VOLUME) {
             gestureHideJob?.cancel()
-            _gestureState.value = GestureOverlayState(isVisible = false)
+            _gestureState.value = _gestureState.value.copy(isVisible = false)
         }
     }
 
     fun dismissGestureOverlayImmediately() {
         gestureHideJob?.cancel()
-        _gestureState.value = GestureOverlayState(isVisible = false)
+        _gestureState.value = _gestureState.value.copy(isVisible = false)
     }
 
     private fun showGestureOverlay(
         type: GestureIconType,
-        text: String,
         progress: Float,
         volLevel: Int,
         boost: Boolean
@@ -299,7 +292,6 @@ class PlayerController(
         _gestureState.value = GestureOverlayState(
             isVisible = true,
             iconType = type,
-            text = text,
             progress = progress,
             volumeLevel = volLevel,
             isBoost = boost
@@ -341,7 +333,7 @@ class PlayerController(
         player.resume()
     }
 
-    /** Display timestamp pill while scrubbing/tapping without thumbnail extraction lag. */
+    /** Maintains timeline preview state without blocking playback or native work. */
     fun onTimelinePreview(targetMs: Long, fraction: Float, active: Boolean) {
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val target = targetMs.coerceIn(0L, duration)
@@ -365,33 +357,29 @@ class PlayerController(
         }
     }
 
-    private var isThumbnailLoading: Boolean = false
-    private var lastThumbnailRequestMs: Long = -1L
     private var slideSeekStartPositionMs: Long = 0L
-    private var hasValidSlideSeek: Boolean = false
 
-    fun onSlideSeekStart() {
+    fun onSlideSeekStart(
+        startPositionMs: Long = player.playbackState.value.positionMs
+    ) {
         dismissGestureOverlayImmediately()
         hideHud()
-        // VLC keeps playback running and holds a forced preview time while the
-        // finger moves. Only one real seek is issued on release.
-        val pos = player.playbackState.value.positionMs
-        slideSeekStartPositionMs = pos
-        hasValidSlideSeek = false
+        // Playback continues; dragging only updates the centered text preview.
+        slideSeekStartPositionMs = startPositionMs
+        val previewStart = SlideSeekMath.previewStartPositionMs(startPositionMs)
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
-        val initialFraction = (pos.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-        lastThumbnailRequestMs = -1L
+        val initialFraction = (previewStart.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
         player.updateState {
             it.copy(
                 slideSeekState = SlideSeekState(
                     isActive = true,
-                    targetMs = pos,
+                    startMs = previewStart,
+                    targetMs = previewStart,
                     seekFraction = initialFraction,
                     thumbnailBitmap = null
                 )
             )
         }
-        requestThumbnail(pos)
     }
 
     fun onSlideSeek(targetMs: Long, fraction: Float) {
@@ -399,7 +387,6 @@ class PlayerController(
         if (duration <= 0L) return
         val clampedFraction = fraction.coerceIn(0f, 1f)
         val clampedTargetMs = targetMs.coerceIn(0L, duration)
-        hasValidSlideSeek = clampedTargetMs != slideSeekStartPositionMs
 
         player.updateState {
             it.copy(
@@ -410,54 +397,29 @@ class PlayerController(
                 )
             )
         }
-
-        if (kotlin.math.abs(clampedTargetMs - lastThumbnailRequestMs) > 800L) {
-            requestThumbnail(clampedTargetMs)
-        }
     }
 
-    private fun requestThumbnail(targetMs: Long) {
-        if (isThumbnailLoading) return
-        lastThumbnailRequestMs = targetMs
-        isThumbnailLoading = true
-        scope.launch {
-            try {
-                val bmp = player.loadThumbnailFrame(targetMs)
-                if (bmp != null) {
-                    player.updateState {
-                        if (it.slideSeekState.isActive) {
-                            it.copy(slideSeekState = it.slideSeekState.copy(thumbnailBitmap = bmp))
-                        } else it
-                    }
-                }
-            } finally {
-                isThumbnailLoading = false
-                val currentTarget = player.playbackState.value.slideSeekState.targetMs
-                if (player.playbackState.value.slideSeekState.isActive &&
-                    kotlin.math.abs(currentTarget - lastThumbnailRequestMs) > 800L
-                ) {
-                    requestThumbnail(currentTarget)
-                }
-            }
-        }
-    }
-
-    fun onSlideSeekEnd() {
+    fun onSlideSeekEnd(finalTargetMs: Long? = null) {
         val state = player.playbackState.value
         if (!state.slideSeekState.isActive) return
 
+        val target = (finalTargetMs ?: state.slideSeekState.targetMs)
+            .coerceIn(0L, state.durationMs.coerceAtLeast(0L))
+        val shouldSeek = state.durationMs > 0L && SlideSeekMath.shouldSeekOnRelease(
+            startPositionMs = slideSeekStartPositionMs,
+            targetPositionMs = target
+        )
         player.updateState {
             it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
-        if (hasValidSlideSeek && state.durationMs > 0L) {
-            player.seekTo(state.slideSeekState.targetMs.coerceIn(0L, state.durationMs))
+        if (shouldSeek) {
+            // Exactly one real seek, only after the finger is released.
+            player.seekTo(target)
         }
-        hasValidSlideSeek = false
     }
 
     fun onSlideSeekCancel() {
         // An interrupted gesture must never fall through to an arbitrary seek.
-        hasValidSlideSeek = false
         player.updateState {
             it.copy(slideSeekState = SlideSeekState(isActive = false))
         }

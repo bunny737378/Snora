@@ -52,6 +52,7 @@ data class VideoInfo(
 
 data class SlideSeekState(
     val isActive: Boolean = false,
+    val startMs: Long = 0L,
     val targetMs: Long = 0L,
     val seekFraction: Float = 0f,
     val thumbnailBitmap: Bitmap? = null
