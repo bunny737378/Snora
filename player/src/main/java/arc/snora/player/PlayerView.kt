@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +51,9 @@ fun PlayerView(
     val doubleTapSeekState by controller.doubleTapSeekState.collectAsState()
 
     var activeMenu by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(isLandscape) {
+        if (!isLandscape) activeMenu = null
+    }
 
     // Physical Back Button navigation priority:
     // 1. If side menu is open, back closes the menu

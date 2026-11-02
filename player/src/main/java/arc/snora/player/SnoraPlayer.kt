@@ -10,6 +10,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState as SessionPlaybackState
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,14 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     private var hasAudioFocus = false
     private var audioFocusRequest: AudioFocusRequest? = null
     private var mediaSession: MediaSession? = null
+    private val playbackNotification = PlayerNotificationManager(context)
+    private var currentTitle: String = "Video"
+    private var currentPoster: Bitmap? = null
+    private var posterJob: Job? = null
+    private var lastSessionProgressUpdateMs: Long = 0L
+    private var lastMetadataTitle: String? = null
+    private var lastMetadataPoster: Bitmap? = null
+    private var lastMetadataDurationMs: Long = -1L
 
     private val audioFocusChangeListener = AndroidAudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
@@ -88,6 +97,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     }
 
     init {
+        PlaybackActionReceiver.attach(this)
         ensureMpvCreated()
         try {
             MPVLib.addObserver(this)
@@ -152,7 +162,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                     override fun onStop() { pause() }
                     override fun onSeekTo(pos: Long) { seekTo(pos) }
                 })
-                isActive = true
+                isActive = false
             }
             updateMediaSessionState()
         } catch (t: Throwable) {
@@ -164,6 +174,13 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             val session = mediaSession ?: return
             val state = _playbackState.value
             val isPlaying = state.status == PlaybackStatus.PLAYING
+            val sessionState = when (state.status) {
+                PlaybackStatus.PLAYING -> SessionPlaybackState.STATE_PLAYING
+                PlaybackStatus.BUFFERING -> SessionPlaybackState.STATE_BUFFERING
+                PlaybackStatus.ENDED -> SessionPlaybackState.STATE_STOPPED
+                PlaybackStatus.ERROR -> SessionPlaybackState.STATE_ERROR
+                else -> SessionPlaybackState.STATE_PAUSED
+            }
             val playbackStateBuilder = SessionPlaybackState.Builder()
                 .setActions(
                     SessionPlaybackState.ACTION_PLAY or
@@ -173,17 +190,38 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                     SessionPlaybackState.ACTION_SEEK_TO
                 )
                 .setState(
-                    if (isPlaying) SessionPlaybackState.STATE_PLAYING else SessionPlaybackState.STATE_PAUSED,
+                    sessionState,
                     state.positionMs,
-                    1.0f
+                    if (isPlaying) state.speed else 0f
                 )
             session.setPlaybackState(playbackStateBuilder.build())
 
-            val titleText = currentPathOrUri.substringAfterLast('/').ifEmpty { "Video" }
-            val metaBuilder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, titleText)
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, state.durationMs)
-            session.setMetadata(metaBuilder.build())
+            if (lastMetadataTitle != currentTitle ||
+                lastMetadataPoster !== currentPoster ||
+                lastMetadataDurationMs != state.durationMs
+            ) {
+                val metaBuilder = MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
+                    .putLong(MediaMetadata.METADATA_KEY_DURATION, state.durationMs)
+                currentPoster?.let {
+                    metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it)
+                }
+                session.setMetadata(metaBuilder.build())
+                lastMetadataTitle = currentTitle
+                lastMetadataPoster = currentPoster
+                lastMetadataDurationMs = state.durationMs
+            }
+
+            if (isMpvPlaying) {
+                playbackNotification.show(
+                    state = state,
+                    title = currentTitle,
+                    poster = currentPoster,
+                    mediaSession = session
+                )
+            } else {
+                playbackNotification.cancel()
+            }
         } catch (t: Throwable) {
         }
     }
@@ -279,15 +317,23 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     fun playMedia(
         pathOrUri: String,
         startPositionMs: Long = 0L,
-        subtitleAppearance: SubtitleAppearance? = null
+        subtitleAppearance: SubtitleAppearance? = null,
+        title: String? = null
     ) {
         playbackRequestId += 1L
+        val requestId = playbackRequestId
         currentPathOrUri = pathOrUri
+        currentTitle = title?.takeIf { it.isNotBlank() }
+            ?: pathOrUri.substringAfterLast('/').ifBlank { "Video" }
+        currentPoster = null
+        posterJob?.cancel()
+        lastSessionProgressUpdateMs = 0L
         pendingStartPositionMs = startPositionMs.coerceAtLeast(0L)
         needsFileLoad = true
         thumbnailLoader.setDataSource(pathOrUri)
         ensureMpvCreated()
         requestAudioFocus()
+        mediaSession?.isActive = true
 
         isMpvPlaying = true
         isBuffering = true
@@ -310,6 +356,13 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             )
         )
         updateMediaSessionState()
+        posterJob = playerScope.launch {
+            val poster = thumbnailLoader.loadFrame(1_000L)
+            if (poster != null && requestId == playbackRequestId) {
+                currentPoster = poster
+                updateMediaSessionState()
+            }
+        }
 
         // A tap normally happens before Compose has created the SurfaceView.
         // Keep the request pending instead of starting an audio-only mpv file with
@@ -399,9 +452,11 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         isBuffering = false
         progressJob?.cancel()
         pausedRedrawJob?.cancel()
+        posterJob?.cancel()
         abandonAudioFocus()
         _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
         updateMediaSessionState()
+        mediaSession?.isActive = false
 
         playerScope.launch(mpvCommandDispatcher) {
             if (requestId != playbackRequestId) return@launch
@@ -492,6 +547,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                 selectedAudioTrackId = currentAid,
                 selectedSubtitleTrackId = currentSid
             )
+            updateMediaSessionState()
         } catch (t: Throwable) {
         }
     }
@@ -544,6 +600,11 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                             else -> PlaybackStatus.PLAYING
                         }
                     )
+                    val nowMs = SystemClock.uptimeMillis()
+                    if (!isPaused && nowMs - lastSessionProgressUpdateMs >= 1_000L) {
+                        lastSessionProgressUpdateMs = nowMs
+                        updateMediaSessionState()
+                    }
                 } catch (t: Throwable) {
                 }
                 delay(200)
@@ -596,6 +657,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             val sec = (clamped / 1000.0).toString()
             MPVLib.command(arrayOf("seek", sec, "absolute"))
             _playbackState.value = _playbackState.value.copy(positionMs = clamped)
+            updateMediaSessionState()
         } catch (t: Throwable) {
         }
     }
@@ -612,6 +674,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         try {
             MPVLib.setPropertyDouble("speed", clamped.toDouble())
             _playbackState.value = _playbackState.value.copy(speed = clamped)
+            updateMediaSessionState()
         } catch (t: Throwable) {
         }
     }
@@ -777,6 +840,48 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             percent = ((clamped.toFloat() / 15f) * 100f).roundToInt(),
             isBoost = clamped > 15
         )
+    }
+
+    /** Syncs external device-stream changes without cancelling an unchanged mpv boost. */
+    fun syncVolumeFromDevice(): VolumeUiState {
+        val audio = systemAudioManager
+        val currentLevel = _playbackState.value.volumeLevel
+        if (audio == null) {
+            return VolumeUiState(
+                level = currentLevel,
+                percent = ((currentLevel.toFloat() / 15f) * 100f).roundToInt(),
+                isBoost = currentLevel > 15
+            )
+        }
+
+        return try {
+            val deviceLevel = audio.getStreamVolume(AndroidAudioManager.STREAM_MUSIC)
+            if (currentLevel > 15 && deviceLevel >= maxDeviceVolume) {
+                return VolumeUiState(
+                    level = currentLevel,
+                    percent = ((currentLevel.toFloat() / 15f) * 100f).roundToInt(),
+                    isBoost = true
+                )
+            }
+
+            val level = (
+                (deviceLevel.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f
+            ).roundToInt().coerceIn(0, 15)
+            val percent = (
+                (deviceLevel.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 100f
+            ).roundToInt().coerceIn(0, 100)
+            if (level != currentLevel || currentLevel > 15) {
+                MPVLib.setPropertyDouble("volume", 100.0)
+                _playbackState.value = _playbackState.value.copy(volumeLevel = level)
+            }
+            VolumeUiState(level = level, percent = percent, isBoost = false)
+        } catch (t: Throwable) {
+            VolumeUiState(
+                level = currentLevel,
+                percent = ((currentLevel.toFloat() / 15f) * 100f).roundToInt(),
+                isBoost = currentLevel > 15
+            )
+        }
     }
 
     /** Changes the real media stream by one hardware-key step, without a system popup. */
@@ -955,6 +1060,9 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         playbackRequestId += 1L
         progressJob?.cancel()
         pausedRedrawJob?.cancel()
+        posterJob?.cancel()
+        playbackNotification.cancel()
+        PlaybackActionReceiver.detach(this)
         isMpvPlaying = false
         needsFileLoad = false
         isBuffering = false

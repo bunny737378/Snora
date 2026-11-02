@@ -108,6 +108,13 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (isPlayerActive && ::playerController.isInitialized) {
+            playerController.syncWithDevice()
+        }
+    }
+
     override fun onDestroy() {
         if (::playerController.isInitialized) {
             playerController.onPlayerViewDisposed(this)
@@ -188,9 +195,9 @@ fun MainContent(
             val customAppearance = subtitleAppearance.takeUnless { it.isDefault() }
             if (customAppearance == null) {
                 // Let the player use its own defaults when nothing was customized.
-                player.playMedia(source, 0L)
+                player.playMedia(source, 0L, title = title)
             } else {
-                player.playMedia(source, 0L, customAppearance)
+                player.playMedia(source, 0L, customAppearance, title)
             }
         }
     }
@@ -213,7 +220,8 @@ fun MainContent(
             permissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.READ_MEDIA_VIDEO,
-                    Manifest.permission.READ_MEDIA_AUDIO
+                    Manifest.permission.READ_MEDIA_AUDIO,
+                    Manifest.permission.POST_NOTIFICATIONS
                 )
             )
         } else {

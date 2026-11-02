@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/notification_segment_root"
+    android:layout_width="0dp"
+    android:layout_height="8dp"
+    android:layout_weight="1">
+
+    <ProgressBar
+        android:id="@+id/notification_segment_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="8dp"
+        android:indeterminate="false"
+        android:max="1000"
+        android:maxHeight="8dp"
+        android:minHeight="0dp"
+        android:progress="0"
+        android:progressBackgroundTint="#38FFFFFF"
+        android:progressTint="#FF64A8FF" />
+
+    <View
+        android:id="@+id/notification_segment_divider"
+        android:layout_width="1dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="end"
+        android:background="#B2111418" />
+</FrameLayout>

@@ -1,9 +1,22 @@
 package arc.snora.player
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.database.ContentObserver
+import android.media.AudioManager as AndroidAudioManager
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.view.WindowManager
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,7 +30,7 @@ data class GestureOverlayState(
     val isVisible: Boolean = false,
     val iconType: GestureIconType = GestureIconType.NONE,
     val progress: Float = 0f,
-    val volumeLevel: Int = 15,
+    val volumeLevel: Float = 15f,
     val isBoost: Boolean = false
 )
 
@@ -50,6 +63,7 @@ class PlayerController(
 
     private var autoHideJob: Job? = null
     private var gestureHideJob: Job? = null
+    private var lastGestureInteractionMs: Long = 0L
     private var doubleTapJob: Job? = null
     private var timelinePreviewJob: Job? = null
     private var isScrubbing: Boolean = false
@@ -57,25 +71,46 @@ class PlayerController(
     private var accumulatedVolumeDelta: Float = 0f
     private var brightnessBeforePlayer: Float? = null
     private var currentBrightness: Float? = null
+    private var playerActivity: Activity? = null
+    private var deviceObserversRegistered = false
+    private var hasRequestedBrightnessPermission = false
+    @Volatile private var pendingSystemBrightness: Float? = null
+    private var systemBrightnessWriteJob: Job? = null
+
+    private val brightnessObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            syncBrightnessFromDevice(showOverlay = true)
+        }
+    }
+
+    private val volumeChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != VOLUME_CHANGED_ACTION) return
+            val streamType = intent.getIntExtra(
+                EXTRA_VOLUME_STREAM_TYPE,
+                AndroidAudioManager.STREAM_MUSIC
+            )
+            if (streamType == AndroidAudioManager.STREAM_MUSIC) {
+                syncVolumeFromDevice(showOverlay = true)
+            }
+        }
+    }
 
     init {
         scheduleAutoHide()
     }
 
     fun onPlayerViewCreated(activity: Activity?) {
+        playerActivity = activity
         if (activity != null && brightnessBeforePlayer == null) {
-            val attributes = activity.window.attributes
-            brightnessBeforePlayer = attributes.screenBrightness
-            currentBrightness = if (attributes.screenBrightness >= 0f) {
-                attributes.screenBrightness
-            } else {
-                readSystemBrightness(activity)
-            }
+            brightnessBeforePlayer = activity.window.attributes.screenBrightness
         }
         accumulatedVolumeDelta = 0f
         isScrubbing = false
         _gestureState.value = GestureOverlayState()
         _doubleTapSeekState.value = DoubleTapSeekState()
+        registerDeviceObservers()
+        syncWithDevice()
         showHud()
     }
 
@@ -84,21 +119,117 @@ class PlayerController(
         gestureHideJob?.cancel()
         doubleTapJob?.cancel()
         timelinePreviewJob?.cancel()
+        unregisterDeviceObservers()
+        stopSystemBrightnessWriter(activity)
         _gestureState.value = GestureOverlayState()
         _doubleTapSeekState.value = DoubleTapSeekState()
 
-        val original = brightnessBeforePlayer
-        if (activity != null && original != null) {
-            // Window brightness controls the real display while SNORA is visible,
-            // not a video shader. Restoring the original override also restores
-            // the system's previous brightness as soon as the player closes.
+        if (activity != null) {
             val attributes = activity.window.attributes
-            attributes.screenBrightness = original
+            attributes.screenBrightness = if (Settings.System.canWrite(activity)) {
+                // The system setting now owns brightness, including after close.
+                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            } else {
+                // Permission-free fallback retains the original local-window behavior.
+                brightnessBeforePlayer ?: attributes.screenBrightness
+            }
             activity.window.attributes = attributes
         }
         brightnessBeforePlayer = null
         currentBrightness = null
         accumulatedVolumeDelta = 0f
+        playerActivity = null
+    }
+
+    /** Re-reads both device values on launch and when returning to the player. */
+    fun syncWithDevice() {
+        syncVolumeFromDevice(showOverlay = false)
+        syncBrightnessFromDevice(showOverlay = false)
+        startSystemBrightnessWriter(playerActivity)
+    }
+
+    private fun registerDeviceObservers() {
+        if (deviceObserversRegistered) return
+        deviceObserversRegistered = true
+        try {
+            context.contentResolver.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.SCREEN_BRIGHTNESS),
+                false,
+                brightnessObserver
+            )
+        } catch (t: Throwable) {
+        }
+        try {
+            val filter = IntentFilter(VOLUME_CHANGED_ACTION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(
+                    volumeChangedReceiver,
+                    filter,
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.registerReceiver(volumeChangedReceiver, filter)
+            }
+        } catch (t: Throwable) {
+        }
+    }
+
+    private fun unregisterDeviceObservers() {
+        if (!deviceObserversRegistered) return
+        deviceObserversRegistered = false
+        try {
+            context.contentResolver.unregisterContentObserver(brightnessObserver)
+        } catch (t: Throwable) {
+        }
+        try {
+            context.unregisterReceiver(volumeChangedReceiver)
+        } catch (t: Throwable) {
+        }
+    }
+
+    private fun syncVolumeFromDevice(showOverlay: Boolean) {
+        val previousLevel = player.playbackState.value.volumeLevel
+        val volume = player.syncVolumeFromDevice()
+        val changed = volume.level != previousLevel ||
+            (previousLevel > 15 && !volume.isBoost)
+        if (!changed) return
+
+        accumulatedVolumeDelta = 0f
+        if (showOverlay) {
+            dismissBrightnessImmediately()
+            hideHud()
+            showVolumeOverlay(volume)
+        }
+    }
+
+    private fun syncBrightnessFromDevice(showOverlay: Boolean) {
+        val activity = playerActivity ?: return
+        val previous = currentBrightness
+        val systemBrightness = readSystemBrightness(activity)
+        val changed = previous == null || abs(previous - systemBrightness) > 0.002f
+        currentBrightness = systemBrightness
+        applyWindowBrightness(activity, systemBrightness)
+        if (showOverlay && previous != null && changed) {
+            dismissVolumeImmediately()
+            hideHud()
+            showBrightnessOverlay(systemBrightness)
+        }
+    }
+
+    private fun applyWindowBrightness(activity: Activity, brightness: Float) {
+        val attributes = activity.window.attributes
+        attributes.screenBrightness = brightness.coerceIn(0.01f, 1f)
+        activity.window.attributes = attributes
+    }
+
+    private fun showBrightnessOverlay(brightness: Float) {
+        showGestureOverlay(
+            type = GestureIconType.BRIGHTNESS,
+            progress = brightness,
+            volLevel = 0f,
+            boost = false
+        )
     }
 
     private fun readSystemBrightness(activity: Activity): Float {
@@ -210,6 +341,11 @@ class PlayerController(
     }
 
     fun adjustVolumeGesture(deltaPercent: Float) {
+        if (!_gestureState.value.isVisible ||
+            _gestureState.value.iconType != GestureIconType.VOLUME
+        ) {
+            accumulatedVolumeDelta = 0f
+        }
         dismissBrightnessImmediately()
         hideHud()
 
@@ -218,13 +354,29 @@ class PlayerController(
         if (steps != 0) {
             val current = player.playbackState.value.volumeLevel
             val target = (current + steps).coerceIn(0, 30)
-            val volume = player.setVolume30(target)
-            accumulatedVolumeDelta -= steps
-            showVolumeOverlay(volume)
+            player.setVolume30(target)
+            accumulatedVolumeDelta = if (target == 0 || target == 30) {
+                0f
+            } else {
+                accumulatedVolumeDelta - steps
+            }
         }
+
+        // The system stream changes in discrete steps, but the indicator follows
+        // every fractional pointer movement without restarting an animation.
+        val displayLevel = (
+            player.playbackState.value.volumeLevel + accumulatedVolumeDelta
+        ).coerceIn(0f, 30f)
+        showGestureOverlay(
+            type = GestureIconType.VOLUME,
+            progress = displayLevel / 30f,
+            volLevel = displayLevel,
+            boost = displayLevel > 15f
+        )
     }
 
     fun onHardwareVolumeKey(direction: Int) {
+        accumulatedVolumeDelta = 0f
         dismissBrightnessImmediately()
         hideHud()
         showVolumeOverlay(player.adjustDeviceVolume(direction))
@@ -234,7 +386,7 @@ class PlayerController(
         showGestureOverlay(
             type = GestureIconType.VOLUME,
             progress = volume.level.toFloat() / 30f,
-            volLevel = volume.level,
+            volLevel = volume.level.toFloat(),
             boost = volume.isBoost
         )
     }
@@ -244,23 +396,79 @@ class PlayerController(
         hideHud()
 
         activity?.let { act ->
+            if (!Settings.System.canWrite(act) && !hasRequestedBrightnessPermission) {
+                requestSystemBrightnessPermission(act)
+                return@let
+            }
             if (brightnessBeforePlayer == null) {
                 brightnessBeforePlayer = act.window.attributes.screenBrightness
-                currentBrightness = readSystemBrightness(act)
             }
             val current = currentBrightness ?: readSystemBrightness(act)
             val target = (current + deltaPercent).coerceIn(0.01f, 1.0f)
             currentBrightness = target
-            val lp = act.window.attributes
-            lp.screenBrightness = target
-            act.window.attributes = lp
 
-            showGestureOverlay(
-                type = GestureIconType.BRIGHTNESS,
-                progress = target,
-                volLevel = 0,
-                boost = false
+            if (Settings.System.canWrite(act)) {
+                pendingSystemBrightness = target
+                startSystemBrightnessWriter(act)
+            }
+            applyWindowBrightness(act, target)
+            showBrightnessOverlay(target)
+        }
+    }
+
+    private fun requestSystemBrightnessPermission(activity: Activity) {
+        hasRequestedBrightnessPermission = true
+        val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+            data = Uri.parse("package:${activity.packageName}")
+        }
+        try {
+            activity.startActivity(intent)
+        } catch (t: Throwable) {
+            try {
+                activity.startActivity(Intent(Settings.ACTION_SETTINGS))
+            } catch (ignored: Throwable) {
+            }
+        }
+    }
+
+    /** Coalesces system writes off the UI thread while the window/fill update immediately. */
+    private fun startSystemBrightnessWriter(activity: Activity?) {
+        if (activity == null || !Settings.System.canWrite(activity)) return
+        if (systemBrightnessWriteJob?.isActive == true) return
+        systemBrightnessWriteJob = scope.launch(Dispatchers.IO) {
+            while (true) {
+                val target = pendingSystemBrightness
+                if (target != null) {
+                    pendingSystemBrightness = null
+                    writeSystemBrightness(activity, target)
+                }
+                delay(50)
+            }
+        }
+    }
+
+    private fun stopSystemBrightnessWriter(activity: Activity?) {
+        systemBrightnessWriteJob?.cancel()
+        systemBrightnessWriteJob = null
+        val finalTarget = pendingSystemBrightness
+        pendingSystemBrightness = null
+        if (activity != null && finalTarget != null && Settings.System.canWrite(activity)) {
+            // Do not lose the final finger position if the player closes mid-drag.
+            scope.launch(Dispatchers.IO) {
+                writeSystemBrightness(activity, finalTarget)
+            }
+        }
+    }
+
+    private fun writeSystemBrightness(activity: Activity, brightness: Float) {
+        try {
+            Settings.System.putInt(
+                activity.contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+                (brightness * 255f).roundToInt().coerceIn(1, 255)
             )
+        } catch (t: Throwable) {
+            // The local window remains functional if the grant is revoked.
         }
     }
 
@@ -273,6 +481,7 @@ class PlayerController(
 
     private fun dismissVolumeImmediately() {
         if (_gestureState.value.iconType == GestureIconType.VOLUME) {
+            accumulatedVolumeDelta = 0f
             gestureHideJob?.cancel()
             _gestureState.value = _gestureState.value.copy(isVisible = false)
         }
@@ -286,7 +495,7 @@ class PlayerController(
     private fun showGestureOverlay(
         type: GestureIconType,
         progress: Float,
-        volLevel: Int,
+        volLevel: Float,
         boost: Boolean
     ) {
         _gestureState.value = GestureOverlayState(
@@ -296,10 +505,18 @@ class PlayerController(
             volumeLevel = volLevel,
             isBoost = boost
         )
-        gestureHideJob?.cancel()
-        gestureHideJob = scope.launch {
-            delay(1100)
-            _gestureState.value = _gestureState.value.copy(isVisible = false)
+        lastGestureInteractionMs = SystemClock.uptimeMillis()
+        if (gestureHideJob?.isActive != true) {
+            gestureHideJob = scope.launch {
+                while (true) {
+                    val remainingMs = 1_100L -
+                        (SystemClock.uptimeMillis() - lastGestureInteractionMs)
+                    if (remainingMs <= 0L) break
+                    delay(remainingMs)
+                }
+                _gestureState.value = _gestureState.value.copy(isVisible = false)
+                gestureHideJob = null
+            }
         }
     }
 
@@ -423,5 +640,10 @@ class PlayerController(
         player.updateState {
             it.copy(slideSeekState = SlideSeekState(isActive = false))
         }
+    }
+
+    companion object {
+        private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+        private const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
     }
 }
