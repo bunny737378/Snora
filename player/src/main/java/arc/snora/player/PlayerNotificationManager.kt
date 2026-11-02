@@ -9,7 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Icon
+import android.graphics.drawable.Icon
 import android.media.session.MediaSession
 import android.os.Build
 import android.widget.RemoteViews
@@ -41,7 +41,7 @@ internal class PlayerNotificationManager(private val context: Context) {
         val timeText = "${formatTime(state.positionMs)} / ${formatTime(state.durationMs)}"
         val style = Notification.MediaStyle()
             .setShowActionsInCompactView(0)
-        mediaSession?.let { style.setMediaSession(it.token) }
+        mediaSession?.let { style.setMediaSession(it.sessionToken) }
 
         val builder = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_play)
