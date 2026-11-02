@@ -2,8 +2,14 @@ package arc.snora.player
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager as AndroidAudioManager
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState as SessionPlaybackState
 import android.net.Uri
+import android.os.Build
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +44,23 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
     private val maxDeviceVolume =
         systemAudioManager?.getStreamMaxVolume(AndroidAudioManager.STREAM_MUSIC) ?: 15
 
+    private var hasAudioFocus = false
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var mediaSession: MediaSession? = null
+
+    private val audioFocusChangeListener = AndroidAudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AndroidAudioManager.AUDIOFOCUS_LOSS,
+            AndroidAudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AndroidAudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                pause()
+            }
+            AndroidAudioManager.AUDIOFOCUS_GAIN -> {
+                // Audio focus restored
+            }
+        }
+    }
+
     val subtitleManager = SubtitleManager(this)
     val audioManager = AudioManager(this)
     val videoRenderer = VideoRenderer(this)
@@ -53,12 +76,97 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             MPVLib.addObserver(this)
         } catch (t: Throwable) {
         }
+        setupMediaSession()
         val currentSysVol = systemAudioManager?.getStreamVolume(AndroidAudioManager.STREAM_MUSIC) ?: 10
         val initialLevel = ((currentSysVol.toFloat() / maxDeviceVolume.toFloat().coerceAtLeast(1f)) * 15f).toInt().coerceIn(1, 15)
         _playbackState.value = _playbackState.value.copy(
             volumeLevel = initialLevel,
             videoInfo = VideoInfo(hwdecActive = "HW")
         )
+    }
+
+    fun requestAudioFocus(): Boolean {
+        if (hasAudioFocus) return true
+        val am = systemAudioManager ?: return false
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build()
+            val req = AudioFocusRequest.Builder(AndroidAudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(false)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build()
+            audioFocusRequest = req
+            am.requestAudioFocus(req)
+        } else {
+            @Suppress("DEPRECATION")
+            am.requestAudioFocus(
+                audioFocusChangeListener,
+                AndroidAudioManager.STREAM_MUSIC,
+                AndroidAudioManager.AUDIOFOCUS_GAIN
+            )
+        }
+        hasAudioFocus = (result == AndroidAudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        return hasAudioFocus
+    }
+
+    fun abandonAudioFocus() {
+        if (!hasAudioFocus) return
+        val am = systemAudioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(audioFocusChangeListener)
+        }
+        hasAudioFocus = false
+    }
+
+    private fun setupMediaSession() {
+        try {
+            mediaSession = MediaSession(context, "SnoraPlayerSession").apply {
+                setCallback(object : MediaSession.Callback() {
+                    override fun onPlay() { resume() }
+                    override fun onPause() { pause() }
+                    override fun onStop() { pause() }
+                    override fun onSeekTo(pos: Long) { seekTo(pos) }
+                })
+                isActive = true
+            }
+            updateMediaSessionState()
+        } catch (t: Throwable) {
+        }
+    }
+
+    private fun updateMediaSessionState() {
+        try {
+            val session = mediaSession ?: return
+            val state = _playbackState.value
+            val isPlaying = state.status == PlaybackStatus.PLAYING
+            val playbackStateBuilder = SessionPlaybackState.Builder()
+                .setActions(
+                    SessionPlaybackState.ACTION_PLAY or
+                    SessionPlaybackState.ACTION_PAUSE or
+                    SessionPlaybackState.ACTION_PLAY_PAUSE or
+                    SessionPlaybackState.ACTION_STOP or
+                    SessionPlaybackState.ACTION_SEEK_TO
+                )
+                .setState(
+                    if (isPlaying) SessionPlaybackState.STATE_PLAYING else SessionPlaybackState.STATE_PAUSED,
+                    state.positionMs,
+                    1.0f
+                )
+            session.setPlaybackState(playbackStateBuilder.build())
+
+            val titleText = currentPathOrUri.substringAfterLast('/').ifEmpty { "Video" }
+            val metaBuilder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, titleText)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, state.durationMs)
+            session.setMetadata(metaBuilder.build())
+        } catch (t: Throwable) {
+        }
     }
 
     private fun ensureMpvCreated() {
@@ -131,6 +239,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         currentPathOrUri = pathOrUri
         thumbnailLoader.setDataSource(pathOrUri)
         ensureMpvCreated()
+        requestAudioFocus()
 
         isMpvPlaying = true
         currentSurface?.let {
@@ -149,6 +258,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
             positionMs = 0L,
             errorMessage = null
         )
+        updateMediaSessionState()
 
         try {
             MPVLib.command(arrayOf("loadfile", pathOrUri))
@@ -159,6 +269,7 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                 status = PlaybackStatus.ERROR,
                 errorMessage = t.localizedMessage ?: "Failed to open video"
             )
+            updateMediaSessionState()
         }
 
         startMpvProgressTracker()
@@ -213,14 +324,22 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
                 .filter { it.type == TrackType.AUDIO || it.type == TrackType.SUBTITLE }
                 .groupingBy { it.type to LanguageNames.groupingKey(it.lang) }
                 .eachCount()
+
+            val languageSeenIndices = mutableMapOf<Pair<TrackType, String>, Int>()
             val namedTracks = trackList.map { track ->
                 if (track.type != TrackType.AUDIO && track.type != TrackType.SUBTITLE) return@map track
                 val label = if (track.type == TrackType.AUDIO) "Audio" else "Subtitle"
+                val groupKey = track.type to LanguageNames.groupingKey(track.lang)
+                val totalForLang = languageCounts[groupKey] ?: 1
+                val indexForLang = (languageSeenIndices[groupKey] ?: 0) + 1
+                languageSeenIndices[groupKey] = indexForLang
+
                 track.copy(
                     title = LanguageNames.displayTrackTitle(
                         title = track.title,
                         lang = track.lang,
-                        multipleTracksForLanguage = (languageCounts[track.type to LanguageNames.groupingKey(track.lang)] ?: 0) > 1,
+                        trackIndexForLanguage = indexForLang,
+                        totalForLanguage = totalForLang,
                         fallback = "$label Track ${track.id}"
                     )
                 )
@@ -308,14 +427,18 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         try {
             MPVLib.setPropertyBoolean("pause", true)
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PAUSED)
+            abandonAudioFocus()
+            updateMediaSessionState()
         } catch (t: Throwable) {
         }
     }
 
     fun resume() {
+        requestAudioFocus()
         try {
             MPVLib.setPropertyBoolean("pause", false)
             _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+            updateMediaSessionState()
         } catch (t: Throwable) {
         }
     }
@@ -621,6 +744,13 @@ class SnoraPlayer(private val context: Context) : MPVLib.EventObserver {
         progressJob?.cancel()
         isMpvPlaying = false
         isBuffering = false
+        abandonAudioFocus()
+        try {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+            mediaSession = null
+        } catch (t: Throwable) {
+        }
         try {
             thumbnailLoader.release()
             MPVLib.removeObserver(this)

@@ -82,7 +82,13 @@ class PlayerController(
         }
 
         if (player.playbackState.value.isControlsLocked) {
-            _isHudVisible.value = !_isHudVisible.value
+            val next = !_isHudVisible.value
+            _isHudVisible.value = next
+            if (next) {
+                scheduleLockAutoHide()
+            } else {
+                autoHideJob?.cancel()
+            }
             return
         }
 
@@ -115,6 +121,16 @@ class PlayerController(
         autoHideJob = scope.launch {
             delay(3500)
             if (!player.playbackState.value.isControlsLocked && !isScrubbing) {
+                _isHudVisible.value = false
+            }
+        }
+    }
+
+    fun scheduleLockAutoHide() {
+        autoHideJob?.cancel()
+        autoHideJob = scope.launch {
+            delay(4000)
+            if (player.playbackState.value.isControlsLocked) {
                 _isHudVisible.value = false
             }
         }
@@ -257,36 +273,38 @@ class PlayerController(
 
     fun toggleLock() {
         val currentLocked = player.playbackState.value.isControlsLocked
-        player.setControlsLocked(!currentLocked)
-        if (!currentLocked) {
-            _isHudVisible.value = false
+        val newLocked = !currentLocked
+        player.setControlsLocked(newLocked)
+        if (newLocked) {
+            _isHudVisible.value = true
+            scheduleLockAutoHide()
         } else {
             showHud()
         }
     }
 
-    /** Preview the shared cached thumbnail while scrubbing/tapping the standard seek bar. */
+    fun replay() {
+        player.seekTo(0L)
+        player.resume()
+    }
+
+    /** Display timestamp pill while scrubbing/tapping without thumbnail extraction lag. */
     fun onTimelinePreview(targetMs: Long, fraction: Float, active: Boolean) {
         val duration = player.playbackState.value.durationMs.coerceAtLeast(1L)
         val target = targetMs.coerceIn(0L, duration)
         timelinePreviewJob?.cancel()
         if (active) {
-            val isNewPreview = !player.playbackState.value.slideSeekState.isActive
-            if (isNewPreview) lastThumbnailRequestMs = -1L
             player.updateState {
                 it.copy(slideSeekState = SlideSeekState(
                     isActive = true,
                     targetMs = target,
                     seekFraction = fraction.coerceIn(0f, 1f),
-                    thumbnailBitmap = it.slideSeekState.thumbnailBitmap
+                    thumbnailBitmap = null
                 ))
-            }
-            if (lastThumbnailRequestMs < 0L || kotlin.math.abs(target - lastThumbnailRequestMs) > 800L) {
-                requestThumbnail(target)
             }
         } else {
             timelinePreviewJob = scope.launch {
-                delay(900)
+                delay(400)
                 if (!isScrubbing) {
                     player.updateState { it.copy(slideSeekState = SlideSeekState(isActive = false)) }
                 }

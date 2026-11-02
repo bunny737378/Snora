@@ -55,7 +55,17 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,6 +73,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -119,6 +131,7 @@ fun PlayerControls(
     onPickSubtitle: () -> Unit,
     onPickAudio: () -> Unit,
     onToggleOrientation: () -> Unit = {},
+    onReplay: () -> Unit = { onSeek(0L); onTogglePlayPause() },
     modifier: Modifier = Modifier
 ) {
     val configuration = LocalConfiguration.current
@@ -201,40 +214,32 @@ fun PlayerControls(
             }
         }
 
-        // Material 3 contained loading indicator for initial load and rebuffering.
+        // Material 3 Expressive contained loading indicator for initial load and rebuffering.
         if (state.status == PlaybackStatus.BUFFERING) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(64.dp)
-                    .background(Color(0xCC111317), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(34.dp),
-                    color = Color(0xFF80B5FF),
-                    trackColor = Color(0x553F4B5B),
-                    strokeWidth = 3.dp
-                )
-            }
+            M3ExpressiveLoadingIndicator(
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
 
-        // Locked state
+        // Locked state: unlock button appears only when HUD is active (auto-hides after 4s, toggles on screen tap)
         if (state.isControlsLocked) {
-            IconButton(
-                onClick = onToggleLock,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(20.dp)
-                    .size(46.dp)
-                    .background(Color(0x99000000), CircleShape)
-                    .testTag("unlock_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = "Unlock Controls",
-                    tint = Color(0xFF2979FF)
-                )
+            if (isHudVisible) {
+                IconButton(
+                    onClick = onToggleLock,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(20.dp)
+                        .size(46.dp)
+                        .background(Color(0xCC0D0E12), CircleShape)
+                        .border(1.dp, Color(0x33FFFFFF), CircleShape)
+                        .testTag("unlock_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Unlock Controls",
+                        tint = Color(0xFF2979FF)
+                    )
+                }
             }
             return@Box
         }
@@ -437,12 +442,28 @@ fun PlayerControls(
                 }
             }
 
-            // Center Play / Pause button (No dark shadow circle behind it)
+            // Center Play / Pause / Replay button
             Box(
                 modifier = Modifier.align(Alignment.Center),
                 contentAlignment = Alignment.Center
             ) {
-                if (state.status != PlaybackStatus.BUFFERING) {
+                if (state.status == PlaybackStatus.ENDED) {
+                    IconButton(
+                        onClick = onReplay,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(Color(0xCC0D0E12), CircleShape)
+                            .border(1.dp, Color(0x33FFFFFF), CircleShape)
+                            .testTag("replay_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Replay,
+                            contentDescription = "Replay Video",
+                            tint = Color.White,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                } else if (state.status != PlaybackStatus.BUFFERING) {
                     IconButton(
                         onClick = onTogglePlayPause,
                         modifier = Modifier.size(60.dp).testTag("play_pause_button")
@@ -564,7 +585,7 @@ fun PlayerControls(
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            // Soft gradient shadow extending past the menu from the right, with click to dismiss
+            // Soft gradient shadow extending past the menu from the right with doubled contrast
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -572,10 +593,10 @@ fun PlayerControls(
                         Brush.horizontalGradient(
                             colorStops = arrayOf(
                                 0.0f to Color.Transparent,
-                                0.45f to Color.Transparent,
-                                0.7f to Color(0x44000000),
-                                0.88f to Color(0x77000000),
-                                1.0f to Color(0xB0000000)
+                                0.35f to Color.Transparent,
+                                0.6f to Color(0x88000000),
+                                0.82f to Color(0xCC000000),
+                                1.0f to Color(0xF2000000)
                             )
                         )
                     )
@@ -657,59 +678,27 @@ fun SlideSeekFloatingOverlay(
         val totalWidth = maxWidth
         val fraction = slideState.seekFraction.coerceIn(0f, 1f)
 
-        // Floating 16:9 thumbnail and timestamp box above the thumb
-        val cardWidth = 140.dp
-        val cardHeight = 78.dp
-        val maxOffsetPx = (totalWidth - cardWidth)
-        val xOffset = (maxOffsetPx * fraction).coerceIn(0.dp, totalWidth - cardWidth)
+        // Floating timestamp pill above the thumb position (no thumbnail box to eliminate seek lag)
+        val pillWidth = 72.dp
+        val maxOffsetPx = (totalWidth - pillWidth)
+        val xOffset = (maxOffsetPx * fraction).coerceIn(0.dp, totalWidth - pillWidth)
 
-        Column(
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .offset { IntOffset(xOffset.roundToPx(), 0) }
-                .padding(bottom = if (showTimeline) 36.dp else 72.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(bottom = if (showTimeline) 36.dp else 56.dp)
+                .background(Color(0xDD0D0E12), RoundedCornerShape(14.dp))
+                .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(14.dp))
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
         ) {
-            // 16:9 Thumbnail Box in Crop mode
-            Box(
-                modifier = Modifier
-                    .size(width = cardWidth, height = cardHeight)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xDD0D0E12))
-                    .border(1.5.dp, Color(0x66FFFFFF), RoundedCornerShape(8.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                if (slideState.thumbnailBitmap != null) {
-                    Image(
-                        bitmap = slideState.thumbnailBitmap.asImageBitmap(),
-                        contentDescription = "Seek Frame Thumbnail",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Text(
-                        text = "Preview...",
-                        color = Color(0x99FFFFFF),
-                        fontSize = 11.sp
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Only seek point time below thumbnail box
-            Box(
-                modifier = Modifier
-                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = formatTimestamp(slideState.targetMs),
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            Text(
+                text = formatTimestamp(slideState.targetMs),
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
 
         // Gesture-seek mini timeline is shown only when the standard controls are hidden.
@@ -1755,5 +1744,86 @@ fun formatTimestamp(ms: Long): String {
         String.format(Locale.US, "%d:%02d:%02d", h, m, s)
     } else {
         String.format(Locale.US, "%02d:%02d", m, s)
+    }
+}
+
+/**
+ * Material 3 Expressive Contained Loading Indicator
+ * Features a circular dark pill container with a rotating and morphing expressive arc.
+ */
+@Composable
+fun M3ExpressiveLoadingIndicator(modifier: Modifier = Modifier) {
+    val infiniteTransition = rememberInfiniteTransition(label = "m3_expressive_contained_loading")
+
+    val rotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "rotation"
+    )
+
+    val sweepAngle by infiniteTransition.animateFloat(
+        initialValue = 28f,
+        targetValue = 265f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 1200
+                28f at 0
+                260f at 600 using FastOutSlowInEasing
+                28f at 1200 using FastOutSlowInEasing
+            },
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "sweepAngle"
+    )
+
+    val startAngleOffset by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "startAngleOffset"
+    )
+
+    Box(
+        modifier = modifier
+            .size(64.dp)
+            .background(Color(0xEE14171E), CircleShape)
+            .border(1.dp, Color(0x33FFFFFF), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(34.dp)) {
+            val strokeWidth = 3.5.dp.toPx()
+            val diameter = size.minDimension - strokeWidth
+            val arcSize = Size(diameter, diameter)
+            val topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f)
+
+            // Subtle track background ring
+            drawArc(
+                color = Color(0x334E5B6E),
+                startAngle = 0f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+            )
+
+            // Expressive active morphing arc
+            drawArc(
+                color = Color(0xFF80B5FF),
+                startAngle = (rotation + startAngleOffset) % 360f,
+                sweepAngle = sweepAngle,
+                useCenter = false,
+                topLeft = topLeft,
+                size = arcSize,
+                style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+            )
+        }
     }
 }

@@ -225,7 +225,8 @@ fun PlayerView(
             onPreviewSeek = { targetMs, fraction, active -> controller.onTimelinePreview(targetMs, fraction, active) },
             onPickSubtitle = { subtitlePicker.launch(arrayOf("*/*")) },
             onPickAudio = { audioPicker.launch(arrayOf("audio/*", "*/*")) },
-            onToggleOrientation = { controller.toggleOrientation(activity) }
+            onToggleOrientation = { controller.toggleOrientation(activity) },
+            onReplay = { controller.replay() }
         )
     }
 }

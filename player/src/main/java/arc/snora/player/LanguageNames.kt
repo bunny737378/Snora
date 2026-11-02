@@ -50,25 +50,38 @@ object LanguageNames {
 
     fun languageFor(code: String): Language? {
         val normalized = code.trim().lowercase().substringBefore('-').substringBefore('_')
+        if (normalized.isEmpty() || normalized == "und" || normalized == "unk") return null
         return byCode[normalized]
     }
 
     /**
-     * Use a muxed title only when it contains a complete ISO code or full language name.
-     * Splitting on punctuation and whitespace avoids false matches such as "en" in "English".
+     * User's 3 Exact Track Naming Rules:
+     * 1st: lang matches map & code matches in title -> {lang full name}
+     * 2nd: lang matches map & code does not match in title -> {lang full name}
+     * 3rd: lang does NOT match map -> {title} (or fallback)
+     * If multiple tracks exist for the same language, appends index to distinguish.
      */
-    fun displayTrackTitle(title: String, lang: String, multipleTracksForLanguage: Boolean, fallback: String): String {
+    fun displayTrackTitle(
+        title: String,
+        lang: String,
+        trackIndexForLanguage: Int = 1,
+        totalForLanguage: Int = 1,
+        fallback: String
+    ): String {
         val cleanTitle = title.trim()
-        if (multipleTracksForLanguage) return cleanTitle.ifEmpty { fallback }
+        val language = languageFor(lang)
 
-        val language = languageFor(lang) ?: return cleanTitle.ifEmpty { fallback }
-        if (cleanTitle.isEmpty()) return language.fullName
-
-        val words = cleanTitle.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
-            .filter { it.isNotEmpty() }.toSet()
-        val titleHasLanguage = (listOf(language.iso2, language.iso3, language.fullName) + language.aliases)
-            .any { it.lowercase() in words }
-        return if (titleHasLanguage) cleanTitle else language.fullName
+        return if (language != null) {
+            // Rules 1 & 2: language matched in map -> {lang full name}
+            if (totalForLanguage > 1) {
+                "${language.fullName} $trackIndexForLanguage"
+            } else {
+                language.fullName
+            }
+        } else {
+            // Rule 3: language not matching map -> {title}
+            cleanTitle.ifEmpty { fallback }
+        }
     }
 
     fun groupingKey(lang: String): String {
